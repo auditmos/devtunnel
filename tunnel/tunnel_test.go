@@ -398,6 +398,74 @@ func TestHTTPForwardingNoSession(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
 }
 
+func TestRequestLogging(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Response", "logged")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response body"))
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	var logged []*RequestLog
+	logger := &mockLogger{logs: &logged}
+	client.SetLogger(logger)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	req, _ := http.NewRequest("POST", "http://"+srv.Addr()+"/proxy/"+sess.Subdomain+"/webhook", strings.NewReader(`{"event":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	require.Len(t, logged, 1)
+	log := logged[0]
+	assert.Equal(t, "POST", log.Method)
+	assert.Equal(t, "/webhook", log.URL)
+	assert.Equal(t, "application/json", log.RequestHeaders["Content-Type"])
+	assert.Equal(t, "Bearer secret", log.RequestHeaders["Authorization"])
+	assert.Equal(t, []byte(`{"event":"test"}`), log.RequestBody)
+	assert.Equal(t, 200, log.StatusCode)
+	assert.Equal(t, "logged", log.ResponseHeaders["X-Response"])
+	assert.Equal(t, []byte("response body"), log.ResponseBody)
+	assert.GreaterOrEqual(t, log.DurationMs, int64(0))
+}
+
+type mockLogger struct {
+	logs *[]*RequestLog
+}
+
+func (m *mockLogger) Log(l *RequestLog) error {
+	*m.logs = append(*m.logs, l)
+	return nil
+}
+
 func getFirstSession(srv *Server) *Session {
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()

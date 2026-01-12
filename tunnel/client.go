@@ -16,6 +16,21 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+type RequestLog struct {
+	Method          string
+	URL             string
+	RequestHeaders  map[string]string
+	RequestBody     []byte
+	StatusCode      int
+	ResponseHeaders map[string]string
+	ResponseBody    []byte
+	DurationMs      int64
+}
+
+type RequestLogger interface {
+	Log(log *RequestLog) error
+}
+
 type Client struct {
 	serverAddr string
 	localPort  string
@@ -31,6 +46,7 @@ type Client struct {
 	maxBackoff   time.Duration
 	onConnected  func(publicURL string)
 	onDisconnect func(err error)
+	logger       RequestLogger
 }
 
 type ClientConfig struct {
@@ -55,6 +71,10 @@ func (c *Client) OnConnected(fn func(publicURL string)) {
 
 func (c *Client) OnDisconnect(fn func(err error)) {
 	c.onDisconnect = fn
+}
+
+func (c *Client) SetLogger(l RequestLogger) {
+	c.logger = l
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -257,6 +277,8 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 		return
 	}
 
+	start := time.Now()
+
 	localURL := fmt.Sprintf("http://127.0.0.1:%s%s", c.localPort, req.URL)
 	httpReq, err := http.NewRequest(req.Method, localURL, bytes.NewReader(req.Body))
 	if err != nil {
@@ -289,6 +311,24 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 	for k, v := range resp.Header {
 		if len(v) > 0 {
 			headers[k] = v[0]
+		}
+	}
+
+	durationMs := time.Since(start).Milliseconds()
+
+	if c.logger != nil {
+		reqLog := &RequestLog{
+			Method:          req.Method,
+			URL:             req.URL,
+			RequestHeaders:  req.Headers,
+			RequestBody:     req.Body,
+			StatusCode:      resp.StatusCode,
+			ResponseHeaders: headers,
+			ResponseBody:    body,
+			DurationMs:      durationMs,
+		}
+		if err := c.logger.Log(reqLog); err != nil {
+			log.Printf("log request: %v", err)
 		}
 	}
 

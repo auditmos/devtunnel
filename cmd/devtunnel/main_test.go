@@ -12,7 +12,7 @@ func TestNewApp(t *testing.T) {
 	app := NewApp()
 	assert.Equal(t, "devtunnel", app.Name)
 	assert.Equal(t, "expose localhost to the internet", app.Usage)
-	assert.Len(t, app.Commands, 2)
+	assert.Len(t, app.Commands, 3)
 }
 
 func TestServerCommand(t *testing.T) {
@@ -95,4 +95,24 @@ func TestClientSafeFlagExists(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "safe flag not found")
+}
+
+func TestReplayCommand(t *testing.T) {
+	app := NewApp()
+	var found bool
+	for _, cmd := range app.Commands {
+		if cmd.Name == "replay" {
+			found = true
+			assert.Equal(t, "replay a shared request to localhost", cmd.Usage)
+			assert.Equal(t, "<url>", cmd.ArgsUsage)
+		}
+	}
+	assert.True(t, found, "replay command not found")
+}
+
+func TestReplayRequiresURL(t *testing.T) {
+	app := NewApp()
+	err := app.Run([]string{"devtunnel", "replay"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "url argument required")
 }

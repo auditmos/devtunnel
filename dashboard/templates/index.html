@@ -1,0 +1,140 @@
+{{define "head"}}
+<style>
+    .requests-list { list-style: none; }
+    .request-item { background: #252542; border-radius: 8px; padding: 16px; margin-bottom: 12px; cursor: pointer; transition: background 0.2s; }
+    .request-item:hover { background: #2d2d4a; }
+    .request-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .method { font-weight: 700; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; }
+    .method-get { background: #10b981; color: #fff; }
+    .method-post { background: #f59e0b; color: #fff; }
+    .method-put { background: #3b82f6; color: #fff; }
+    .method-delete { background: #ef4444; color: #fff; }
+    .method-patch { background: #8b5cf6; color: #fff; }
+    .url { font-family: monospace; color: #ddd; word-break: break-all; }
+    .meta { display: flex; gap: 16px; font-size: 0.875rem; color: #888; }
+    .status-code { font-weight: 600; }
+    .status-2xx { color: #10b981; }
+    .status-3xx { color: #f59e0b; }
+    .status-4xx { color: #ef4444; }
+    .status-5xx { color: #dc2626; }
+    .empty { text-align: center; padding: 60px 20px; color: #666; }
+    .request-detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #333; }
+    .request-item.expanded .request-detail { display: block; }
+    .detail-section { margin-bottom: 12px; }
+    .detail-title { font-size: 0.75rem; color: #888; text-transform: uppercase; margin-bottom: 4px; }
+    .detail-content { background: #1a1a2e; padding: 12px; border-radius: 4px; font-family: monospace; font-size: 0.875rem; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+    .replay-btn { background: #8b5cf6; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; margin-top: 8px; }
+    .replay-btn:hover { background: #7c3aed; }
+    .share-btn { background: #059669; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; margin-top: 8px; margin-left: 8px; }
+    .share-btn:hover { background: #047857; }
+    .share-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
+    .share-modal.show { display: flex; }
+    .share-modal-content { background: #252542; padding: 24px; border-radius: 8px; max-width: 500px; width: 90%; }
+    .share-modal h3 { margin-bottom: 16px; color: #00d4ff; }
+    .share-url { width: 100%; padding: 12px; background: #1a1a2e; border: 1px solid #444; border-radius: 4px; color: #fff; font-family: monospace; margin-bottom: 16px; }
+    .share-modal-btns { display: flex; gap: 8px; }
+    .copy-btn { background: #00d4ff; color: #1a1a2e; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    .close-btn { background: #666; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+</style>
+{{end}}
+
+{{define "content"}}
+<ul class="requests-list">
+    {{if .Requests}}
+        {{range .Requests}}
+        <li class="request-item" onclick="this.classList.toggle('expanded')">
+            <div class="request-header">
+                <span class="method method-{{.Method | lower}}">{{.Method}}</span>
+                <span class="url">{{.URL}}</span>
+            </div>
+            <div class="meta">
+                <span class="status-code {{.StatusClass}}">{{.StatusCode}}</span>
+                <span>{{.DurationMs}}ms</span>
+                <span>{{.TimeAgo}}</span>
+            </div>
+            <div class="request-detail">
+                <div class="detail-section">
+                    <div class="detail-title">Request Headers</div>
+                    <div class="detail-content">{{.RequestHeadersFormatted}}</div>
+                </div>
+                {{if .RequestBody}}
+                <div class="detail-section">
+                    <div class="detail-title">Request Body</div>
+                    <div class="detail-content">{{.RequestBody}}</div>
+                </div>
+                {{end}}
+                <div class="detail-section">
+                    <div class="detail-title">Response Headers</div>
+                    <div class="detail-content">{{.ResponseHeadersFormatted}}</div>
+                </div>
+                {{if .ResponseBody}}
+                <div class="detail-section">
+                    <div class="detail-title">Response Body</div>
+                    <div class="detail-content">{{.ResponseBody}}</div>
+                </div>
+                {{end}}
+                <button class="replay-btn" onclick="event.stopPropagation(); replay('{{.ID}}')">Replay</button>
+                <button class="share-btn" onclick="event.stopPropagation(); share('{{.ID}}')">Share Securely</button>
+            </div>
+        </li>
+        {{end}}
+    {{else}}
+        <li class="empty">
+            <p>No requests yet</p>
+            <p style="margin-top: 8px; font-size: 0.875rem;">Send a request to your tunnel to see it here</p>
+        </li>
+    {{end}}
+</ul>
+{{end}}
+
+{{define "scripts"}}
+<div id="shareModal" class="share-modal" onclick="if(event.target===this) closeModal()">
+    <div class="share-modal-content">
+        <h3>Share Request Securely</h3>
+        <p style="color: #888; margin-bottom: 16px; font-size: 0.875rem;">The URL below contains the decryption key in the hash. The server never sees this key.</p>
+        <input type="text" id="shareUrl" class="share-url" readonly>
+        <div class="share-modal-btns">
+            <button class="copy-btn" onclick="copyUrl()">Copy URL</button>
+            <button class="close-btn" onclick="closeModal()">Close</button>
+        </div>
+    </div>
+</div>
+<script>
+function replay(id) {
+    fetch('/api/replay/' + id, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) alert('Replay failed: ' + data.error);
+            else location.reload();
+        })
+        .catch(err => alert('Replay failed: ' + err));
+}
+
+async function share(id) {
+    try {
+        const resp = await fetch('/api/share/' + id, { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) {
+            alert('Share failed: ' + data.error);
+            return;
+        }
+        document.getElementById('shareUrl').value = data.url;
+        document.getElementById('shareModal').classList.add('show');
+    } catch (err) {
+        alert('Share failed: ' + err);
+    }
+}
+
+function closeModal() {
+    document.getElementById('shareModal').classList.remove('show');
+}
+
+function copyUrl() {
+    const input = document.getElementById('shareUrl');
+    input.select();
+    navigator.clipboard.writeText(input.value).then(() => {
+        alert('URL copied to clipboard!');
+    });
+}
+</script>
+{{end}}
