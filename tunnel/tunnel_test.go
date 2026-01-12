@@ -1,0 +1,408 @@
+package tunnel
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestServerStartStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	assert.NotEmpty(t, srv.Addr())
+
+	cancel()
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestClientServerConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+	})
+	client.SetReconnect(false)
+
+	connected := make(chan string, 1)
+	client.OnConnected(func(url string) {
+		connected <- url
+	})
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+
+	select {
+	case url := <-connected:
+		assert.Contains(t, url, "test.local")
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive connected callback")
+	}
+
+	assert.True(t, client.IsConnected())
+	assert.NotEmpty(t, client.PublicURL())
+	assert.Equal(t, 1, srv.SessionCount())
+
+	client.Close()
+	time.Sleep(100 * time.Millisecond)
+	assert.False(t, client.IsConnected())
+}
+
+func TestClientReconnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	assert.True(t, client.IsConnected())
+
+	firstURL := client.PublicURL()
+
+	srv.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	srv2 := NewServer(ServerConfig{Addr: srv.Addr(), Domain: "test.local"})
+	go srv2.Start(ctx2)
+	time.Sleep(50 * time.Millisecond)
+
+	client2 := NewClient(ClientConfig{
+		ServerAddr: srv2.Addr(),
+		LocalPort:  "3000",
+	})
+	client2.SetReconnect(false)
+
+	err = client2.Connect(ctx2)
+	require.NoError(t, err)
+	assert.True(t, client2.IsConnected())
+	assert.NotEqual(t, firstURL, client2.PublicURL())
+}
+
+func TestMultipleClients(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	clients := make([]*Client, 3)
+	for i := range clients {
+		clients[i] = NewClient(ClientConfig{
+			ServerAddr: srv.Addr(),
+			LocalPort:  "3000",
+		})
+		clients[i].SetReconnect(false)
+		err := clients[i].Connect(ctx)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 3, srv.SessionCount())
+
+	urls := make(map[string]bool)
+	for _, c := range clients {
+		urls[c.PublicURL()] = true
+	}
+	assert.Len(t, urls, 3)
+
+	for _, c := range clients {
+		c.Close()
+	}
+}
+
+func TestServerLogsClientConnected(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, srv.SessionCount())
+	sess := srv.GetSession(client.publicURL[len("http://"):len(client.publicURL)-len(".test.local")])
+	if sess == nil {
+		for sub := range srv.sessions {
+			sess = srv.GetSession(sub)
+			break
+		}
+	}
+	require.NotNil(t, sess)
+	assert.NotEmpty(t, sess.Subdomain)
+}
+
+func TestConnectionDropDetection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+	})
+	client.SetReconnect(false)
+
+	disconnected := make(chan error, 1)
+	client.OnDisconnect(func(err error) {
+		disconnected <- err
+	})
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+
+	client.session.Close()
+
+	select {
+	case err := <-disconnected:
+		assert.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not detect disconnect")
+	}
+}
+
+func TestSubdomainRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+		Subdomain:  "myapp",
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+
+	assert.Contains(t, client.PublicURL(), "myapp")
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := (&http.Client{}).Get("http://" + srv.Addr() + "/health")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, 200, resp.StatusCode)
+}
+
+func TestHTTPForwarding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Custom", "test-value")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello from local"))
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	resp, err := http.Get("http://" + srv.Addr() + "/proxy/" + sess.Subdomain + "/test-path")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "hello from local", string(body))
+	assert.Equal(t, "test-value", resp.Header.Get("X-Custom"))
+}
+
+func TestHTTPForwardingWithBody(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var receivedBody []byte
+	var receivedMethod string
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("created"))
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	reqBody := strings.NewReader(`{"key":"value"}`)
+	resp, err := http.Post("http://"+srv.Addr()+"/proxy/"+sess.Subdomain+"/api/data", "application/json", reqBody)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, "POST", receivedMethod)
+	assert.Equal(t, `{"key":"value"}`, string(receivedBody))
+}
+
+func TestHTTPForwardingPreservesHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var receivedHeaders http.Header
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/proxy/"+sess.Subdomain+"/", nil)
+	req.Header.Set("Authorization", "Bearer token123")
+	req.Header.Set("X-Request-ID", "req-456")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, "Bearer token123", receivedHeaders.Get("Authorization"))
+	assert.Equal(t, "req-456", receivedHeaders.Get("X-Request-ID"))
+}
+
+func TestHTTPForwardingNoSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get("http://" + srv.Addr() + "/proxy/nonexistent/path")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func getFirstSession(srv *Server) *Session {
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+	for _, sess := range srv.sessions {
+		return sess
+	}
+	return nil
+}
