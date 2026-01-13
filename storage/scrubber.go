@@ -2,34 +2,43 @@ package storage
 
 import "strings"
 
-var defaultSensitiveKeys = []string{
-	"authorization",
-	"x-api-key",
-	"api-key",
-	"api_key",
-	"apikey",
-	"x-auth-token",
-	"x-access-token",
-	"cookie",
-	"set-cookie",
-	"x-csrf-token",
-	"x-xsrf-token",
-}
-
 const scrubValue = "***"
 
 type Scrubber struct {
-	keys map[string]struct{}
+	keys     map[string]struct{}
+	ruleRepo ScrubRuleRepo
 }
 
 func NewScrubber() *Scrubber {
-	s := &Scrubber{
+	return &Scrubber{
 		keys: make(map[string]struct{}),
 	}
-	for _, k := range defaultSensitiveKeys {
-		s.keys[strings.ToLower(k)] = struct{}{}
+}
+
+func NewScrubberWithRepo(repo ScrubRuleRepo) (*Scrubber, error) {
+	s := &Scrubber{
+		keys:     make(map[string]struct{}),
+		ruleRepo: repo,
 	}
-	return s
+	if err := s.Reload(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Scrubber) Reload() error {
+	if s.ruleRepo == nil {
+		return nil
+	}
+	rules, err := s.ruleRepo.GetAll()
+	if err != nil {
+		return err
+	}
+	s.keys = make(map[string]struct{})
+	for _, rule := range rules {
+		s.keys[strings.ToLower(rule.Pattern)] = struct{}{}
+	}
+	return nil
 }
 
 func (s *Scrubber) ScrubHeaders(headers map[string]string) map[string]string {

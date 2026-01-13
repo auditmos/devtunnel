@@ -13,11 +13,7 @@ type DBLogger struct {
 	scrubber *Scrubber
 }
 
-func NewDBLogger(repo *SQLiteRequestRepo, tunnelID string, safeMode bool) *DBLogger {
-	var scrubber *Scrubber
-	if safeMode {
-		scrubber = NewScrubber()
-	}
+func NewDBLogger(repo *SQLiteRequestRepo, tunnelID string, scrubber *Scrubber) *DBLogger {
 	return &DBLogger{repo: repo, tunnelID: tunnelID, scrubber: scrubber}
 }
 

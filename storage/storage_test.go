@@ -242,7 +242,11 @@ func TestDBLogger_SafeModeScrubsHeaders(t *testing.T) {
 	defer db.Close()
 
 	repo := NewSQLiteRequestRepo(db)
-	logger := NewDBLogger(repo, "tunnel-123", true)
+	scrubRuleRepo := NewSQLiteScrubRuleRepo(db)
+	require.NoError(t, scrubRuleRepo.Seed())
+	scrubber, err := NewScrubberWithRepo(scrubRuleRepo)
+	require.NoError(t, err)
+	logger := NewDBLogger(repo, "tunnel-123", scrubber)
 
 	reqLog := &tunnel.RequestLog{
 		Method:          "POST",
@@ -275,7 +279,7 @@ func TestDBLogger_NoSafeMode_PreservesHeaders(t *testing.T) {
 	defer db.Close()
 
 	repo := NewSQLiteRequestRepo(db)
-	logger := NewDBLogger(repo, "tunnel-123", false)
+	logger := NewDBLogger(repo, "tunnel-123", nil)
 
 	reqLog := &tunnel.RequestLog{
 		Method:          "POST",

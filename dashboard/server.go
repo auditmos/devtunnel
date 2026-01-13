@@ -31,6 +31,7 @@ type Server struct {
 	localAddr     string
 	serverAddr    string
 	repo          storage.RequestRepo
+	scrubRuleRepo storage.ScrubRuleRepo
 	httpServer    *http.Server
 	listener      net.Listener
 	templates     *template.Template
@@ -39,11 +40,12 @@ type Server struct {
 }
 
 type ServerConfig struct {
-	Addr         string
-	Repo         storage.RequestRepo
-	OverridesDir string
-	LocalAddr    string
-	ServerAddr   string
+	Addr          string
+	Repo          storage.RequestRepo
+	ScrubRuleRepo storage.ScrubRuleRepo
+	OverridesDir  string
+	LocalAddr     string
+	ServerAddr    string
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -53,10 +55,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	s := &Server{
-		addr:       cfg.Addr,
-		localAddr:  localAddr,
-		serverAddr: cfg.ServerAddr,
-		repo:       cfg.Repo,
+		addr:          cfg.Addr,
+		localAddr:     localAddr,
+		serverAddr:    cfg.ServerAddr,
+		repo:          cfg.Repo,
+		scrubRuleRepo: cfg.ScrubRuleRepo,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -132,6 +135,8 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("/api/requests", s.handleAPIRequests)
 	mux.HandleFunc("/api/replay/", s.handleReplay)
 	mux.HandleFunc("/api/share/", s.handleShare)
+	mux.HandleFunc("/api/scrub-rules", s.handleScrubRules)
+	mux.HandleFunc("/api/scrub-rules/", s.handleScrubRuleByID)
 	return mux
 }
 
@@ -551,4 +556,114 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ShareResponse{URL: shareURL})
+}
+
+type APIScrubRule struct {
+	ID        string `json:"id"`
+	Pattern   string `json:"pattern"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+type APIScrubRulesResponse struct {
+	Rules []APIScrubRule `json:"rules"`
+}
+
+type CreateScrubRuleRequest struct {
+	Pattern string `json:"pattern"`
+}
+
+func (s *Server) handleScrubRules(w http.ResponseWriter, r *http.Request) {
+	if s.scrubRuleRepo == nil {
+		writeJSONError(w, "scrub rules not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetScrubRules(w, r)
+	case http.MethodPost:
+		s.handleCreateScrubRule(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGetScrubRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.scrubRuleRepo.GetAll()
+	if err != nil {
+		writeJSONError(w, fmt.Sprintf("fetch rules: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	apiRules := make([]APIScrubRule, len(rules))
+	for i, rule := range rules {
+		apiRules[i] = APIScrubRule{
+			ID:        rule.ID,
+			Pattern:   rule.Pattern,
+			CreatedAt: rule.CreatedAt,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(APIScrubRulesResponse{Rules: apiRules})
+}
+
+func (s *Server) handleCreateScrubRule(w http.ResponseWriter, r *http.Request) {
+	var req CreateScrubRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Pattern == "" {
+		writeJSONError(w, "pattern cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	rule, err := s.scrubRuleRepo.Create(req.Pattern)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			writeJSONError(w, "pattern already exists", http.StatusConflict)
+			return
+		}
+		writeJSONError(w, fmt.Sprintf("create rule: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(APIScrubRule{
+		ID:        rule.ID,
+		Pattern:   rule.Pattern,
+		CreatedAt: rule.CreatedAt,
+	})
+}
+
+func (s *Server) handleScrubRuleByID(w http.ResponseWriter, r *http.Request) {
+	if s.scrubRuleRepo == nil {
+		writeJSONError(w, "scrub rules not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/scrub-rules/")
+	if id == "" {
+		writeJSONError(w, "missing rule id", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.scrubRuleRepo.Delete(id); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeJSONError(w, "rule not found", http.StatusNotFound)
+			return
+		}
+		writeJSONError(w, fmt.Sprintf("delete rule: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

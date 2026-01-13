@@ -25,11 +25,7 @@ type JSONLogger struct {
 	scrubber *Scrubber
 }
 
-func NewJSONLogger(w io.Writer, safeMode bool) *JSONLogger {
-	var scrubber *Scrubber
-	if safeMode {
-		scrubber = NewScrubber()
-	}
+func NewJSONLogger(w io.Writer, scrubber *Scrubber) *JSONLogger {
 	return &JSONLogger{w: w, scrubber: scrubber}
 }
 

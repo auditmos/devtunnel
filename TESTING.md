@@ -180,22 +180,22 @@ python3 -m http.server 3000
    ```
 
 ```bash
-# Setup: Server on 8080, client forwarding 3000, subdomain is 84f9eb71
+# Setup: Server on 8080, client forwarding 3000, subdomain is e37fb04e
 
 # Test 1: Direct Host header (your current approach)
-curl -H "Host: 84f9eb71.localhost" http://localhost:8080
+curl -H "Host: e37fb04e.localhost" http://localhost:8080
 
 # Expected: ::ffff:127.0.0.1 - - [13/Jan/2026 12:40:23] "GET / HTTP/1.1" 200 -
 # In the python3 -m http.server 3000
 
 # Test 2: Using /proxy/ path
-curl http://localhost:8080/proxy/84f9eb71/
+curl http://localhost:8080/proxy/e37fb04e/
 
 # Expected: ::ffff:127.0.0.1 - - [13/Jan/2026 12:40:23] "GET / HTTP/1.1" 200 -
 # In the python3 -m http.server 3000
 
 # Test 3: Malformed Host header (your error)
-curl -H "Host: http://de249ed5.localhost" http://localhost:8080
+curl -H "Host: http://e37fb04e.localhost" http://localhost:8080
 
 # Expected: 
 ```
@@ -225,8 +225,6 @@ curl "http://localhost:8080/proxy/$SUBDOMAIN/?foo=bar"
 
 # Expected: Response from local server
 ```
-
-**If this works:** Tunnel logic is functional, only subdomain routing missing
 
 ---
 
@@ -334,3 +332,9 @@ cat logs.jsonl | jq
 ```
 
 ---
+
+# DevTunnel Automated Testing Guide
+
+```bash
+chmod +x ./scripts/test-manual.sh
+```

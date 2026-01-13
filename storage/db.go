@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS requests (
 
 CREATE INDEX IF NOT EXISTS idx_requests_tunnel ON requests(tunnel_id);
 CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS scrub_rules (
+    id         TEXT PRIMARY KEY,
+    pattern    TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrub_rules_pattern ON scrub_rules(pattern);
 `
 
 // OpenDB opens client database with tunnels and requests tables

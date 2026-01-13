@@ -59,6 +59,7 @@ type Server struct {
 	certsDir      string
 	readyCallback func()
 	version       string
+	rateLimiter   *RateLimiter
 }
 
 type Session struct {
@@ -69,13 +70,15 @@ type Session struct {
 }
 
 type ServerConfig struct {
-	Addr        string
-	Domain      string
-	BlobRepo    BlobRepo
-	AutoDomain  bool
-	EnableHTTPS bool
-	CertsDir    string
-	Version     string
+	Addr           string
+	Domain         string
+	BlobRepo       BlobRepo
+	AutoDomain     bool
+	EnableHTTPS    bool
+	CertsDir       string
+	Version        string
+	RequestsPerMin int
+	MaxConns       int
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -100,6 +103,15 @@ func NewServer(cfg ServerConfig) *Server {
 		ver = "dev"
 	}
 
+	reqPerMin := cfg.RequestsPerMin
+	if reqPerMin <= 0 {
+		reqPerMin = 60
+	}
+	maxConns := cfg.MaxConns
+	if maxConns <= 0 {
+		maxConns = 5
+	}
+
 	s := &Server{
 		addr:        cfg.Addr,
 		domain:      domain,
@@ -109,6 +121,7 @@ func NewServer(cfg ServerConfig) *Server {
 		enableHTTPS: cfg.EnableHTTPS,
 		certsDir:    certsDir,
 		version:     ver,
+		rateLimiter: NewRateLimiter(reqPerMin, maxConns),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -149,6 +162,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/proxy/", s.handleProxy)
 	mux.HandleFunc("/api/share", s.handleShare)
 	mux.HandleFunc("/api/blob/", s.handleGetBlob)
+	mux.HandleFunc("/api/rate-limits", s.handleRateLimits)
 	mux.HandleFunc("/shared/", s.handleSharedView)
 	mux.HandleFunc("/", s.handleSubdomainProxy)
 
@@ -287,6 +301,18 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		subdomain = req.Subdomain
 	}
 
+	if s.rateLimiter != nil && !s.rateLimiter.AcquireConnection(subdomain) {
+		log.Printf("connection limit exceeded for subdomain: %s", subdomain)
+		resp := HandshakeResponse{
+			Success: false,
+			Error:   "connection limit exceeded",
+		}
+		json.NewEncoder(stream).Encode(&resp)
+		stream.Close()
+		session.Close()
+		return
+	}
+
 	publicURL := fmt.Sprintf("http://%s.%s", subdomain, s.domain)
 	if s.domain == "" {
 		publicURL = fmt.Sprintf("http://localhost/%s", subdomain)
@@ -313,6 +339,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(&resp); err != nil {
 		log.Printf("encode handshake response: %v", err)
 		s.removeSession(subdomain)
+		if s.rateLimiter != nil {
+			s.rateLimiter.ReleaseConnection(subdomain)
+		}
 		stream.Close()
 		session.Close()
 		return
@@ -327,6 +356,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 func (s *Server) monitorSession(sess *Session) {
 	<-sess.Session.CloseChan()
 	s.removeSession(sess.Subdomain)
+	if s.rateLimiter != nil {
+		s.rateLimiter.ReleaseConnection(sess.Subdomain)
+	}
 	log.Printf("Client disconnected: %s", sess.Subdomain)
 }
 
@@ -380,6 +412,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	targetPath := "/"
 	if len(parts) > 1 {
 		targetPath = "/" + parts[1]
+	}
+
+	if s.rateLimiter != nil {
+		if ok, retryAfter := s.rateLimiter.AllowRequest(subdomain); !ok {
+			WriteRateLimitExceeded(w, retryAfter)
+			return
+		}
 	}
 
 	sess := s.GetSession(subdomain)
@@ -466,6 +505,13 @@ func (s *Server) handleSubdomainProxy(w http.ResponseWriter, r *http.Request) {
 	if subdomain == "" {
 		http.NotFound(w, r)
 		return
+	}
+
+	if s.rateLimiter != nil {
+		if ok, retryAfter := s.rateLimiter.AllowRequest(subdomain); !ok {
+			WriteRateLimitExceeded(w, retryAfter)
+			return
+		}
 	}
 
 	sess := s.GetSession(subdomain)
@@ -601,4 +647,27 @@ func writeServerJSONError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+type RateLimitsResponse struct {
+	RequestsPerMin     int `json:"requests_per_min"`
+	MaxConcurrentConns int `json:"max_concurrent_conns"`
+}
+
+func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	reqPerMin, maxConns := 60, 5
+	if s.rateLimiter != nil {
+		reqPerMin, maxConns = s.rateLimiter.GetLimits()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(RateLimitsResponse{
+		RequestsPerMin:     reqPerMin,
+		MaxConcurrentConns: maxConns,
+	})
 }

@@ -1,0 +1,57 @@
+## 2026-01-13: Dynamic Scrub Rules Management (DB + API) - COMPLETE
+
+### Summary
+Implemented dynamic scrub rules management allowing users to add/remove header scrubbing patterns via API.
+
+### Changes Made
+- `storage/db.go`: Added scrub_rules table schema (id, pattern, created_at)
+- `storage/scrub_rules.go`: New file with ScrubRule struct, ScrubRuleRepo interface, SQLiteScrubRuleRepo impl (GetAll, Create, Delete, Seed)
+- `storage/scrubber.go`: Refactored to load rules from DB via NewScrubberWithRepo(), added Reload() method
+- `storage/logger.go`: Updated NewDBLogger() to accept *Scrubber instead of bool
+- `storage/jsonlogger.go`: Updated NewJSONLogger() to accept *Scrubber instead of bool
+- `dashboard/server.go`: Added ScrubRuleRepo to Server, implemented GET/POST/DELETE /api/scrub-rules endpoints
+- `cmd/devtunnel/main.go`: Wired up ScrubRuleRepo, seeds rules on startup, passes scrubber to loggers
+
+### Tests Added
+- `storage/scrub_rules_test.go`: Full coverage for repository (Seed, Create, Delete, validation)
+- `storage/scrubber_test.go`: Updated to use DB-backed scrubber
+- `storage/jsonlogger_test.go`: Updated to use DB-backed scrubber
+- `storage/storage_test.go`: Updated DBLogger tests
+- `dashboard/server_test.go`: Added API tests for scrub-rules endpoints
+
+### API Endpoints
+- GET /api/scrub-rules - returns {rules: [{id, pattern, created_at}]}
+- POST /api/scrub-rules - accepts {pattern: string}, returns created rule, 409 on duplicate
+- DELETE /api/scrub-rules/{id} - returns 204, 404 if not found
+
+### Notes
+- defaultSensitiveKeys moved from hardcoded slice to scrub_rules DB table via Seed()
+- Scrubber.Reload() allows refreshing rules after API changes
+- Validation prevents empty patterns and duplicates
+- Pre-existing test failures in cmd/devtunnel/main_test.go are unrelated (TestClientCommand ArgsUsage format, TestClientRequiresPort timeout)
+
+## 2026-01-13: Server-Side Rate Limiting (Global Rules) - COMPLETE
+
+### Summary
+Implemented server-side rate limiting with sliding window algorithm for requests and connection limits per subdomain.
+
+### Changes Made
+- `storage/rate_limits.go`: New file with RateLimits struct, RateLimitRepo interface, SQLiteRateLimitRepo impl, schema init and seed functions
+- `tunnel/ratelimit.go`: New file with RateLimiter (sliding window for req/min, connection tracking per subdomain)
+- `tunnel/server.go`: Added rateLimiter field, rate limit checks in handleProxy/handleSubdomainProxy, connection acquire/release in handleConnect/monitorSession, GET /api/rate-limits endpoint
+- `cmd/devtunnel/main.go`: Init rate_limits schema, seed defaults, load limits from DB, pass to server config
+
+### Tests Added
+- `storage/rate_limits_test.go`: Schema init, seeding, idempotency, repo methods
+- `tunnel/ratelimit_test.go`: AllowRequest sliding window, connection limits, subdomain isolation, cleanup
+- `tunnel/tunnel_test.go`: TestRateLimitEndpoint, TestRateLimitBlocksExcessiveRequests, TestConnectionReleaseOnDisconnect
+
+### API Endpoints
+- GET /api/rate-limits - returns {requests_per_min: 60, max_concurrent_conns: 5}
+
+### Design Notes
+- Sliding window algorithm: tracks request timestamps per subdomain, prunes old entries
+- Connection limiting per subdomain (in MVP each client gets unique subdomain, limit mainly for future reserved subdomain support)
+- Returns 429 Too Many Requests with Retry-After header when rate exceeded
+- Connection count cleaned up in monitorSession on client disconnect
+- Defaults: 60 req/min, 5 concurrent conns per subdomain

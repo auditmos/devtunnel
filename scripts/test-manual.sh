@@ -102,6 +102,15 @@ else
     log_fail "Dashboard API returned $HTTP_CODE"
 fi
 
+# Test 4b: Scrub rules API
+log_info "Testing /api/scrub-rules..."
+SCRUB_RESP=$(curl -sf "http://127.0.0.1:4040/api/scrub-rules" || echo "FAIL")
+if echo "$SCRUB_RESP" | grep -q '"authorization"'; then
+    log_pass "/api/scrub-rules returns seeded rules"
+else
+    log_fail "/api/scrub-rules failed: $SCRUB_RESP"
+fi
+
 # Test 5: Invalid subdomain returns 502
 log_info "Testing invalid subdomain..."
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: nonexistent.$DOMAIN" "http://localhost:$SERVER_PORT/")

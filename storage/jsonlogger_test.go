@@ -12,7 +12,7 @@ import (
 
 func TestJSONLogger_Log(t *testing.T) {
 	var buf bytes.Buffer
-	logger := NewJSONLogger(&buf, false)
+	logger := NewJSONLogger(&buf, nil)
 
 	input := &tunnel.RequestLog{
 		Method:          "POST",
@@ -42,8 +42,18 @@ func TestJSONLogger_Log(t *testing.T) {
 }
 
 func TestJSONLogger_SafeMode(t *testing.T) {
+	db, err := OpenMemoryDB()
+	require.NoError(t, err)
+	defer db.Close()
+
+	repo := NewSQLiteScrubRuleRepo(db)
+	require.NoError(t, repo.Seed())
+
+	scrubber, err := NewScrubberWithRepo(repo)
+	require.NoError(t, err)
+
 	var buf bytes.Buffer
-	logger := NewJSONLogger(&buf, true)
+	logger := NewJSONLogger(&buf, scrubber)
 
 	input := &tunnel.RequestLog{
 		Method:         "GET",
@@ -52,7 +62,7 @@ func TestJSONLogger_SafeMode(t *testing.T) {
 		StatusCode:     200,
 	}
 
-	err := logger.Log(input)
+	err = logger.Log(input)
 	require.NoError(t, err)
 
 	var entry JSONLogEntry
@@ -63,8 +73,8 @@ func TestJSONLogger_SafeMode(t *testing.T) {
 
 func TestMultiLogger_Log(t *testing.T) {
 	var buf1, buf2 bytes.Buffer
-	l1 := NewJSONLogger(&buf1, false)
-	l2 := NewJSONLogger(&buf2, false)
+	l1 := NewJSONLogger(&buf1, nil)
+	l2 := NewJSONLogger(&buf2, nil)
 	multi := NewMultiLogger(l1, l2)
 
 	input := &tunnel.RequestLog{

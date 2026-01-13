@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -381,4 +382,195 @@ func TestDashboardPortConflict(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("port conflict not detected")
 	}
+}
+
+func setupScrubRuleRepo(t *testing.T) storage.ScrubRuleRepo {
+	db, err := storage.OpenMemoryDB()
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	repo := storage.NewSQLiteScrubRuleRepo(db)
+	require.NoError(t, repo.Seed())
+	return repo
+}
+
+func TestGetScrubRules_ReturnsSeededRules(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	req := httptest.NewRequest("GET", "/api/scrub-rules", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 200, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+
+	var resp APIScrubRulesResponse
+	err = json.Unmarshal(rec.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(resp.Rules), 10)
+
+	patterns := make(map[string]bool)
+	for _, r := range resp.Rules {
+		patterns[r.Pattern] = true
+	}
+	assert.True(t, patterns["authorization"])
+	assert.True(t, patterns["cookie"])
+}
+
+func TestCreateScrubRule_Success(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	body := bytes.NewBufferString(`{"pattern":"x-custom-secret"}`)
+	req := httptest.NewRequest("POST", "/api/scrub-rules", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 201, rec.Code)
+
+	var resp APIScrubRule
+	err = json.Unmarshal(rec.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.NotEmpty(t, resp.ID)
+	assert.Equal(t, "x-custom-secret", resp.Pattern)
+	assert.NotZero(t, resp.CreatedAt)
+}
+
+func TestCreateScrubRule_EmptyPattern(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	body := bytes.NewBufferString(`{"pattern":""}`)
+	req := httptest.NewRequest("POST", "/api/scrub-rules", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 400, rec.Code)
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.Contains(t, resp["error"], "cannot be empty")
+}
+
+func TestCreateScrubRule_Duplicate(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	body := bytes.NewBufferString(`{"pattern":"authorization"}`)
+	req := httptest.NewRequest("POST", "/api/scrub-rules", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 409, rec.Code)
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.Contains(t, resp["error"], "already exists")
+}
+
+func TestDeleteScrubRule_Success(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	rules, err := scrubRepo.GetAll()
+	require.NoError(t, err)
+	require.NotEmpty(t, rules)
+	ruleID := rules[0].ID
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	req := httptest.NewRequest("DELETE", "/api/scrub-rules/"+ruleID, nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 204, rec.Code)
+
+	rulesAfter, err := scrubRepo.GetAll()
+	require.NoError(t, err)
+	assert.Len(t, rulesAfter, len(rules)-1)
+}
+
+func TestDeleteScrubRule_NotFound(t *testing.T) {
+	scrubRepo := setupScrubRuleRepo(t)
+
+	srv, err := NewServer(ServerConfig{
+		Addr:          ":0",
+		Repo:          newMockRepo(),
+		ScrubRuleRepo: scrubRepo,
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	req := httptest.NewRequest("DELETE", "/api/scrub-rules/nonexistent-id", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 404, rec.Code)
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.Contains(t, resp["error"], "not found")
+}
+
+func TestScrubRulesNotConfigured(t *testing.T) {
+	srv, err := NewServer(ServerConfig{
+		Addr: ":0",
+		Repo: newMockRepo(),
+	})
+	require.NoError(t, err)
+
+	handler := srv.testHandler()
+	req := httptest.NewRequest("GET", "/api/scrub-rules", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, 503, rec.Code)
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	assert.Contains(t, resp["error"], "not configured")
 }

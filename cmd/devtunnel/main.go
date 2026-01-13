@@ -183,6 +183,20 @@ func runServer(port int, domain string, https bool, certsDir string) error {
 		return fmt.Errorf("init blob schema: %w", err)
 	}
 
+	if err := storage.InitRateLimitsSchema(db); err != nil {
+		return fmt.Errorf("init rate_limits schema: %w", err)
+	}
+
+	if err := storage.SeedRateLimits(db); err != nil {
+		return fmt.Errorf("seed rate_limits: %w", err)
+	}
+
+	rateLimitRepo := storage.NewSQLiteRateLimitRepo(db)
+	limits, err := rateLimitRepo.Get()
+	if err != nil {
+		return fmt.Errorf("get rate_limits: %w", err)
+	}
+
 	blobRepo := &blobRepoAdapter{repo: storage.NewSQLiteBlobRepo(db)}
 
 	httpPort := port
@@ -191,13 +205,15 @@ func runServer(port int, domain string, https bool, certsDir string) error {
 	}
 
 	srv := tunnel.NewServer(tunnel.ServerConfig{
-		Addr:        fmt.Sprintf(":%d", httpPort),
-		Domain:      domain,
-		BlobRepo:    blobRepo,
-		AutoDomain:  domain == "",
-		EnableHTTPS: https,
-		CertsDir:    certsDir,
-		Version:     version,
+		Addr:           fmt.Sprintf(":%d", httpPort),
+		Domain:         domain,
+		BlobRepo:       blobRepo,
+		AutoDomain:     domain == "",
+		EnableHTTPS:    https,
+		CertsDir:       certsDir,
+		Version:        version,
+		RequestsPerMin: limits.RequestsPerMin,
+		MaxConns:       limits.MaxConcurrentConns,
 	})
 
 	srv.SetReadyCallback(func() {
@@ -249,12 +265,26 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 
 	repo := storage.NewSQLiteRequestRepo(db)
 	tunnelRepo := storage.NewSQLiteTunnelRepo(db)
+	scrubRuleRepo := storage.NewSQLiteScrubRuleRepo(db)
+
+	if err := scrubRuleRepo.Seed(); err != nil {
+		return fmt.Errorf("seed scrub rules: %w", err)
+	}
+
+	var scrubber *storage.Scrubber
+	if safe {
+		scrubber, err = storage.NewScrubberWithRepo(scrubRuleRepo)
+		if err != nil {
+			return fmt.Errorf("init scrubber: %w", err)
+		}
+	}
+
 	tunnelID := ulid.Make().String()
-	dbLogger := storage.NewDBLogger(repo, tunnelID, safe)
+	dbLogger := storage.NewDBLogger(repo, tunnelID, scrubber)
 
 	var logger tunnel.RequestLogger = dbLogger
 	if jsonOutput {
-		jsonLogger := storage.NewJSONLogger(os.Stdout, safe)
+		jsonLogger := storage.NewJSONLogger(os.Stdout, scrubber)
 		logger = storage.NewMultiLogger(dbLogger, jsonLogger)
 	}
 
@@ -262,11 +292,12 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 
 	overridesDir := filepath.Join(filepath.Dir(dbPath), "overrides")
 	dashSrv, err := dashboard.NewServer(dashboard.ServerConfig{
-		Addr:         dashboardAddr,
-		Repo:         repo,
-		OverridesDir: overridesDir,
-		LocalAddr:    "localhost:" + port,
-		ServerAddr:   server,
+		Addr:          dashboardAddr,
+		Repo:          repo,
+		ScrubRuleRepo: scrubRuleRepo,
+		OverridesDir:  overridesDir,
+		LocalAddr:     "localhost:" + port,
+		ServerAddr:    server,
 	})
 	if err != nil {
 		return fmt.Errorf("init dashboard: %w", err)

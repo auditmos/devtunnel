@@ -14,22 +14,23 @@ Built with a "Product, not Infrastructure" philosophy. Single binary, zero depen
 ### Client (Localhost)
 ```bash
 # Standard
-curl -sSL https://get.devtunnel.dev | sh
+curl -sSL https://raw.githubusercontent.com/auditmos/devtunnel/main/scripts/install.sh | sh
 
 # macOS (Homebrew)
+brew tap auditmos/devtunnel
 brew install devtunnel
 
 devtunnel start 3000
 ```
-**Dashboard:** `http://localhost:4040` (Human) | `http://localhost:4040/api/logs` (AI Agent)
+**Dashboard:** `http://localhost:4040` (Human) | `http://localhost:4040/api/requests` (AI Agent)
 
 ### Server (VPS)
 ```bash
 # Docker (Recommended)
-docker run -d -p 80:80 -p 443:443 ghcr.io/user/devtunnel server
+docker run -d -p 80:80 -p 443:443 ghcr.io/auditmos/devtunnel server
 
 # Binary
-curl -sSL https://get.devtunnel.dev | sh
+curl -sSL https://raw.githubusercontent.com/auditmos/devtunnel/main/scripts/install.sh | sh
 devtunnel server
 ```
 **Done.** Auto-HTTPS, auto-domain, zero config.
@@ -37,7 +38,7 @@ devtunnel server
 ### Manual Download
 ```bash
 # Download for your platform from releases
-wget https://github.com/user/devtunnel/releases/latest/download/devtunnel-$(uname -s)-$(uname -m)
+wget https://github.com/auditmos/devtunnel/releases/latest/download/devtunnel-$(uname -s)-$(uname -m)
 chmod +x devtunnel-*
 ./devtunnel-* start 3000
 ```
@@ -75,17 +76,6 @@ Simple 3-table schema for maximum efficiency:
 1.  **`tunnels`**: Session history.
 2.  **`requests`**: Full request/response log for "Webhook Replay".
 3.  **`scrub_rules`**: Security patterns to redact (e.g., API keys).
-
-## 📅 Implementation Roadmap (7-Day Sprint)
-**Goal:** "First version ≠ Genius. = Not Stupid."
-
-- **Day 1:** Connectivity (Hello World via TCP/HTTP Proxy).
-- **Day 2:** Multiplexing (Yamux over WebSocket).
-- **Day 3:** Persistence (SQLite integration & Logging middleware).
-- **Day 4:** Dashboard (HTMX UI + Replay feature).
-- **Day 5:** Security (Scrubbing sensitive data).
-- **Day 6:** Deployment (Cross-compile & VPS setup).
-- **Day 7:** Reality Check (User testing).
 
 ## 📚 Key Libraries
 - **CLI:** `urfave/cli/v2`

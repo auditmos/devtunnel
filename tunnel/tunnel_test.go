@@ -752,3 +752,112 @@ func TestSubdomainHostRoutingWithPort(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "ok", string(body))
 }
+
+func TestRateLimitEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{
+		Addr:           "127.0.0.1:0",
+		Domain:         "test.local",
+		RequestsPerMin: 100,
+		MaxConns:       10,
+	})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get("http://" + srv.Addr() + "/api/rate-limits")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), `"requests_per_min":100`)
+	assert.Contains(t, string(body), `"max_concurrent_conns":10`)
+}
+
+func TestRateLimitBlocksExcessiveRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{
+		Addr:           "127.0.0.1:0",
+		Domain:         "test.local",
+		RequestsPerMin: 2,
+		MaxConns:       5,
+	})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get("http://" + srv.Addr() + "/proxy/" + sess.Subdomain + "/")
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	resp, err := http.Get("http://" + srv.Addr() + "/proxy/" + sess.Subdomain + "/")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	assert.NotEmpty(t, resp.Header.Get("Retry-After"))
+}
+
+func TestConnectionReleaseOnDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{
+		Addr:           "127.0.0.1:0",
+		Domain:         "test.local",
+		RequestsPerMin: 60,
+		MaxConns:       5,
+	})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  "3000",
+	})
+	client.SetReconnect(false)
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+	subdomain := sess.Subdomain
+
+	client.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	srv.mu.Lock()
+	_, exists := srv.rateLimiter.connCounts[subdomain]
+	srv.mu.Unlock()
+	assert.False(t, exists, "connection should be released after disconnect")
+}
