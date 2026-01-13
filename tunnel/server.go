@@ -58,6 +58,7 @@ type Server struct {
 	enableHTTPS   bool
 	certsDir      string
 	readyCallback func()
+	version       string
 }
 
 type Session struct {
@@ -74,6 +75,7 @@ type ServerConfig struct {
 	AutoDomain  bool
 	EnableHTTPS bool
 	CertsDir    string
+	Version     string
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -93,6 +95,11 @@ func NewServer(cfg ServerConfig) *Server {
 		}
 	}
 
+	ver := cfg.Version
+	if ver == "" {
+		ver = "dev"
+	}
+
 	s := &Server{
 		addr:        cfg.Addr,
 		domain:      domain,
@@ -101,6 +108,7 @@ func NewServer(cfg ServerConfig) *Server {
 		templates:   tmpl,
 		enableHTTPS: cfg.EnableHTTPS,
 		certsDir:    certsDir,
+		version:     ver,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -222,9 +230,20 @@ func (s *Server) Domain() string {
 	return s.domain
 }
 
+type HealthResponse struct {
+	OK      bool   `json:"ok"`
+	Time    string `json:"time"`
+	Version string `json:"version"`
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	resp := HealthResponse{
+		OK:      true,
+		Time:    time.Now().UTC().Format(time.RFC3339),
+		Version: s.version,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -425,6 +444,8 @@ func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Ses
 }
 
 func (s *Server) extractSubdomainFromHost(host string) string {
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimPrefix(host, "https://")
 	host = strings.Split(host, ":")[0]
 	if s.domain == "" {
 		return ""
@@ -512,15 +533,15 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL := s.domain
-	if baseURL == "" {
-		baseURL = r.Host
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ShareResponse{
 		ID:  blob.ID,
-		URL: fmt.Sprintf("http://%s/shared/%s", baseURL, blob.ID),
+		URL: fmt.Sprintf("%s://%s/shared/%s", scheme, r.Host, blob.ID),
 	})
 }
 

@@ -7,7 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schema = `
+const clientSchema = `
 CREATE TABLE IF NOT EXISTS tunnels (
     id          TEXT PRIMARY KEY,
     subdomain   TEXT NOT NULL,
@@ -38,17 +38,27 @@ CREATE INDEX IF NOT EXISTS idx_requests_tunnel ON requests(tunnel_id);
 CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp DESC);
 `
 
+// OpenDB opens client database with tunnels and requests tables
 func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(clientSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
+	return db, nil
+}
+
+// OpenServerDB opens server database (blobs only, no tunnels/requests)
+func OpenServerDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
 	return db, nil
 }
 

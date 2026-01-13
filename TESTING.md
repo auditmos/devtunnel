@@ -82,6 +82,8 @@ python3 -m http.server 3000
    sqlite3 ~/.devtunnel/devtunnel.db
    sqlite> select count(*) from requests;
    0
+   sqlite> select count(*) from tunnels;
+   0
    ```
 
 **Debug if fails:**
@@ -173,31 +175,27 @@ python3 -m http.server 3000
 5. Open the database
    ```bash
    sqlite3 ~/.devtunnel/server.db
-   sqlite> select count(*) from requests;
-   0
-   sqlite> select count(*) from tunnels;
-   0
    sqlite> select count(*) from shared_blobs;
    0
    ```
 
 ```bash
-# Setup: Server on 8080, client forwarding 3000, subdomain is 1b4cdd38
+# Setup: Server on 8080, client forwarding 3000, subdomain is 84f9eb71
 
 # Test 1: Direct Host header (your current approach)
-curl -H "Host: 1b4cdd38.localhost" http://localhost:8080
+curl -H "Host: 84f9eb71.localhost" http://localhost:8080
 
 # Expected: ::ffff:127.0.0.1 - - [13/Jan/2026 12:40:23] "GET / HTTP/1.1" 200 -
 # In the python3 -m http.server 3000
 
 # Test 2: Using /proxy/ path
-curl http://localhost:8080/proxy/1b4cdd38/
+curl http://localhost:8080/proxy/84f9eb71/
 
 # Expected: ::ffff:127.0.0.1 - - [13/Jan/2026 12:40:23] "GET / HTTP/1.1" 200 -
 # In the python3 -m http.server 3000
 
 # Test 3: Malformed Host header (your error)
-curl -H "Host: http://1b4cdd38.localhost" http://localhost:8080
+curl -H "Host: http://de249ed5.localhost" http://localhost:8080
 
 # Expected: 
 ```

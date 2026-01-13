@@ -53,7 +53,7 @@ sleep 2
 # Start devtunnel client
 log_info "Starting devtunnel client..."
 CLIENT_OUTPUT=$(mktemp)
-"$BINARY" start "$CLIENT_PORT" --server "localhost:$SERVER_PORT" > "$CLIENT_OUTPUT" 2>&1 &
+"$BINARY" start -p "$CLIENT_PORT" -s "localhost:$SERVER_PORT" > "$CLIENT_OUTPUT" 2>&1 &
 PIDS+=($!)
 sleep 3
 
@@ -69,7 +69,7 @@ log_pass "Client connected, subdomain: $SUBDOMAIN"
 # Test 1: Health endpoint
 log_info "Testing /health endpoint..."
 RESP=$(curl -sf "http://localhost:$SERVER_PORT/health" || echo "FAIL")
-if [ "$RESP" = "ok" ]; then
+if echo "$RESP" | grep -q '"ok":true'; then
     log_pass "/health returns ok"
 else
     log_fail "/health failed: $RESP"
@@ -110,6 +110,77 @@ if [ "$HTTP_CODE" = "502" ]; then
 else
     log_fail "Invalid subdomain returned $HTTP_CODE (expected 502)"
 fi
+
+# Test 6: --safe flag scrubs sensitive headers
+log_info "Testing --safe flag header scrubbing..."
+# Kill current client, restart with --safe
+kill "${PIDS[2]}" 2>/dev/null || true
+sleep 1
+SAFE_CLIENT_OUTPUT=$(mktemp)
+"$BINARY" start --safe -p "$CLIENT_PORT" -s "localhost:$SERVER_PORT" --dashboard-addr "127.0.0.1:4041" > "$SAFE_CLIENT_OUTPUT" 2>&1 &
+PIDS+=($!)
+sleep 3
+
+SAFE_SUBDOMAIN=$(grep -oE 'http://([a-f0-9]{8})\.' "$SAFE_CLIENT_OUTPUT" | sed 's|http://||;s|\.||' | head -1 || true)
+if [ -z "$SAFE_SUBDOMAIN" ]; then
+    log_fail "Could not start safe-mode client"
+else
+    # Send request with sensitive header
+    curl -s -H "Authorization: Bearer secret-token-123" -H "Host: $SAFE_SUBDOMAIN.$DOMAIN" "http://localhost:$SERVER_PORT/" >/dev/null
+    sleep 1
+    # Check dashboard for scrubbed header (Authorization should be ***)
+    REQUESTS=$(curl -sf "http://127.0.0.1:4041/api/requests?limit=1" || echo "")
+    if echo "$REQUESTS" | grep -q '"Authorization":"\*\*\*"'; then
+        log_pass "--safe flag scrubs Authorization header"
+    else
+        log_fail "--safe flag did not scrub headers"
+        echo "Response: $REQUESTS" | head -c 500
+    fi
+fi
+rm -f "$SAFE_CLIENT_OUTPUT"
+
+# Test 7: --json flag outputs JSONL to stdout
+log_info "Testing --json flag JSONL output..."
+# Kill current client, restart with --json
+kill "${PIDS[2]}" 2>/dev/null || true
+sleep 1
+JSON_CLIENT_OUTPUT=$(mktemp)
+"$BINARY" start --json -p "$CLIENT_PORT" -s "localhost:$SERVER_PORT" --dashboard-addr "127.0.0.1:4042" > "$JSON_CLIENT_OUTPUT" 2>&1 &
+PIDS+=($!)
+sleep 3
+
+JSON_SUBDOMAIN=$(grep -oE 'http://([a-f0-9]{8})\.' "$JSON_CLIENT_OUTPUT" | sed 's|http://||;s|\.||' | head -1 || true)
+if [ -z "$JSON_SUBDOMAIN" ]; then
+    log_fail "Could not start json-mode client"
+else
+    # Send a request to generate log output
+    curl -s -H "Host: $JSON_SUBDOMAIN.$DOMAIN" "http://localhost:$SERVER_PORT/" >/dev/null
+    sleep 1
+    
+    # Extract JSONL entries (lines starting with {)
+    JSON_LINES=$(grep -E '^\{' "$JSON_CLIENT_OUTPUT" | head -1 || echo "")
+    if [ -n "$JSON_LINES" ]; then
+        # Validate it's valid JSON by trying to parse it
+        if echo "$JSON_LINES" | python3 -m json.tool >/dev/null 2>&1; then
+            # Check for required fields
+            if echo "$JSON_LINES" | grep -q '"method"' && \
+               echo "$JSON_LINES" | grep -q '"url"' && \
+               echo "$JSON_LINES" | grep -q '"timestamp"'; then
+                log_pass "--json flag outputs valid JSONL"
+            else
+                log_fail "--json flag output missing required fields"
+            fi
+        else
+            log_fail "--json flag output is not valid JSON"
+            echo "Invalid JSON line: $JSON_LINES"
+        fi
+    else
+        log_fail "--json flag did not output JSONL entries"
+        echo "Client output (last 20 lines):"
+        tail -20 "$JSON_CLIENT_OUTPUT"
+    fi
+fi
+rm -f "$JSON_CLIENT_OUTPUT"
 
 rm -f "$CLIENT_OUTPUT"
 

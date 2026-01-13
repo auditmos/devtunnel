@@ -89,8 +89,14 @@ func clientCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "start",
 		Usage:     "expose local port to the internet",
-		ArgsUsage: "<port>",
+		ArgsUsage: "[port]",
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "port",
+				Aliases: []string{"p"},
+				Value:   "3000",
+				Usage:   "local port to expose",
+			},
 			&cli.StringFlag{
 				Name:    "server",
 				Aliases: []string{"s"},
@@ -112,10 +118,10 @@ func clientCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if c.NArg() < 1 {
-				return fmt.Errorf("port argument required")
+			port := c.String("port")
+			if c.NArg() > 0 {
+				port = c.Args().First()
 			}
-			port := c.Args().First()
 			server := c.String("server")
 			safe := c.Bool("safe")
 			jsonOutput := c.Bool("json")
@@ -167,7 +173,7 @@ func runServer(port int, domain string, https bool, certsDir string) error {
 		return fmt.Errorf("get server db path: %w", err)
 	}
 
-	db, err := storage.OpenDB(dbPath)
+	db, err := storage.OpenServerDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open server db: %w", err)
 	}
@@ -191,6 +197,7 @@ func runServer(port int, domain string, https bool, certsDir string) error {
 		AutoDomain:  domain == "",
 		EnableHTTPS: https,
 		CertsDir:    certsDir,
+		Version:     version,
 	})
 
 	srv.SetReadyCallback(func() {
@@ -241,6 +248,7 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 	defer db.Close()
 
 	repo := storage.NewSQLiteRequestRepo(db)
+	tunnelRepo := storage.NewSQLiteTunnelRepo(db)
 	tunnelID := ulid.Make().String()
 	dbLogger := storage.NewDBLogger(repo, tunnelID, safe)
 
@@ -281,12 +289,25 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 
 	client.SetLogger(logger)
 
-	client.OnConnected(func(url string) {
-		fmt.Printf("Forwarding %s -> localhost:%s\n", url, port)
+	client.OnConnected(func(publicURL string) {
+		fmt.Printf("Forwarding %s -> localhost:%s\n", publicURL, port)
+		subdomain := extractSubdomain(publicURL)
+		t := &storage.Tunnel{
+			ID:        tunnelID,
+			Subdomain: subdomain,
+			ServerURL: server,
+			Status:    "active",
+		}
+		if err := tunnelRepo.Save(t); err != nil {
+			fmt.Printf("save tunnel: %v\n", err)
+		}
 	})
 
 	client.OnDisconnect(func(err error) {
 		fmt.Printf("Disconnected: %v\n", err)
+		if updateErr := tunnelRepo.UpdateStatus(tunnelID, "disconnected", time.Now().UnixMilli()); updateErr != nil {
+			fmt.Printf("update tunnel status: %v\n", updateErr)
+		}
 	})
 
 	if err := client.Connect(ctx); err != nil {
@@ -306,6 +327,19 @@ func getDBPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "devtunnel.db"), nil
+}
+
+func extractSubdomain(publicURL string) string {
+	parsed, err := url.Parse(publicURL)
+	if err != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	parts := strings.Split(host, ".")
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return ""
 }
 
 type SharedRequest struct {

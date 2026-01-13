@@ -32,6 +32,8 @@
         .meta { display: flex; gap: 16px; font-size: 0.875rem; color: #888; margin-bottom: 16px; }
         .expired { text-align: center; padding: 60px; color: #888; }
         .warning { background: #78350f; color: #fef3c7; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-size: 0.875rem; }
+        .replay-info { background: #1e3a5f; border: 1px solid #3b82f6; padding: 12px; border-radius: 8px; margin-top: 16px; }
+        .replay-info code { background: #0f172a; padding: 8px 12px; display: block; border-radius: 4px; font-size: 0.875rem; word-break: break-all; margin-top: 8px; }
     </style>
 </head>
 <body>
@@ -157,6 +159,8 @@
             html += '<div class="section"><div class="section-title">Response Body</div>';
             html += '<div class="section-content">' + escapeHtml(req.response_body) + '</div></div>';
         }
+
+        html += '<div class="replay-info">To replay this request to your localhost:<code>devtunnel replay "' + escapeHtml(window.location.href) + '" --port 3000</code></div>';
 
         html += '</div>';
         return html;
