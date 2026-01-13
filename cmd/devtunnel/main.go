@@ -24,7 +24,11 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-var version = "dev"
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
 
 func main() {
 	app := NewApp()
@@ -38,7 +42,7 @@ func NewApp() *cli.App {
 	return &cli.App{
 		Name:    "devtunnel",
 		Usage:   "expose localhost to the internet",
-		Version: version,
+		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildDate),
 		Commands: []*cli.Command{
 			serverCommand(),
 			clientCommand(),
@@ -62,11 +66,21 @@ func serverCommand() *cli.Command {
 				Name:  "domain",
 				Usage: "public domain (auto-detected if not set)",
 			},
+			&cli.BoolFlag{
+				Name:  "https",
+				Usage: "enable auto-HTTPS with Let's Encrypt (requires domain)",
+			},
+			&cli.StringFlag{
+				Name:  "certs-dir",
+				Usage: "certificate cache directory (default: ~/.devtunnel/certs)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			port := c.Int("port")
 			domain := c.String("domain")
-			return runServer(port, domain)
+			https := c.Bool("https")
+			certsDir := c.String("certs-dir")
+			return runServer(port, domain, https, certsDir)
 		},
 	}
 }
@@ -87,6 +101,15 @@ func clientCommand() *cli.Command {
 				Name:  "safe",
 				Usage: "scrub sensitive headers before logging",
 			},
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "output logs to stdout in JSONL format",
+			},
+			&cli.StringFlag{
+				Name:  "dashboard-addr",
+				Value: "127.0.0.1:4040",
+				Usage: "dashboard listen address",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() < 1 {
@@ -95,7 +118,9 @@ func clientCommand() *cli.Command {
 			port := c.Args().First()
 			server := c.String("server")
 			safe := c.Bool("safe")
-			return runClient(port, server, safe)
+			jsonOutput := c.Bool("json")
+			dashboardAddr := c.String("dashboard-addr")
+			return runClient(port, server, safe, jsonOutput, dashboardAddr)
 		},
 	}
 }
@@ -124,7 +149,7 @@ func replayCommand() *cli.Command {
 	}
 }
 
-func runServer(port int, domain string) error {
+func runServer(port int, domain string, https bool, certsDir string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -154,10 +179,22 @@ func runServer(port int, domain string) error {
 
 	blobRepo := &blobRepoAdapter{repo: storage.NewSQLiteBlobRepo(db)}
 
+	httpPort := port
+	if https {
+		httpPort = 80
+	}
+
 	srv := tunnel.NewServer(tunnel.ServerConfig{
-		Addr:     fmt.Sprintf(":%d", port),
-		Domain:   domain,
-		BlobRepo: blobRepo,
+		Addr:        fmt.Sprintf(":%d", httpPort),
+		Domain:      domain,
+		BlobRepo:    blobRepo,
+		AutoDomain:  domain == "",
+		EnableHTTPS: https,
+		CertsDir:    certsDir,
+	})
+
+	srv.SetReadyCallback(func() {
+		fmt.Printf("Server ready on %s\n", srv.Addr())
 	})
 
 	return srv.Start(ctx)
@@ -175,7 +212,7 @@ func getServerDBPath() (string, error) {
 	return filepath.Join(dir, "server.db"), nil
 }
 
-func runClient(port, server string, safe bool) error {
+func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -205,13 +242,19 @@ func runClient(port, server string, safe bool) error {
 
 	repo := storage.NewSQLiteRequestRepo(db)
 	tunnelID := ulid.Make().String()
-	logger := storage.NewDBLogger(repo, tunnelID, safe)
+	dbLogger := storage.NewDBLogger(repo, tunnelID, safe)
+
+	var logger tunnel.RequestLogger = dbLogger
+	if jsonOutput {
+		jsonLogger := storage.NewJSONLogger(os.Stdout, safe)
+		logger = storage.NewMultiLogger(dbLogger, jsonLogger)
+	}
 
 	fmt.Printf("Request logging enabled: %s\n", dbPath)
 
 	overridesDir := filepath.Join(filepath.Dir(dbPath), "overrides")
 	dashSrv, err := dashboard.NewServer(dashboard.ServerConfig{
-		Addr:         ":4040",
+		Addr:         dashboardAddr,
 		Repo:         repo,
 		OverridesDir: overridesDir,
 		LocalAddr:    "localhost:" + port,
@@ -221,8 +264,11 @@ func runClient(port, server string, safe bool) error {
 		return fmt.Errorf("init dashboard: %w", err)
 	}
 
+	dashSrv.SetReadyCallback(func() {
+		fmt.Printf("Dashboard: http://%s\n", dashSrv.Addr())
+	})
+
 	go func() {
-		fmt.Println("Dashboard: http://localhost:4040")
 		if dashErr := dashSrv.Start(ctx); dashErr != nil {
 			fmt.Printf("Dashboard error: %v\n", dashErr)
 		}
@@ -243,7 +289,11 @@ func runClient(port, server string, safe bool) error {
 		fmt.Printf("Disconnected: %v\n", err)
 	})
 
-	return client.Connect(ctx)
+	if err := client.Connect(ctx); err != nil {
+		return err
+	}
+	client.Wait(ctx)
+	return nil
 }
 
 func getDBPath() (string, error) {

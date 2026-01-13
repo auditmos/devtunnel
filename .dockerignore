@@ -1,0 +1,9 @@
+dist/
+*.db
+*.exe
+.git/
+.github/
+.docs/
+*.md
+!go.mod
+!go.sum

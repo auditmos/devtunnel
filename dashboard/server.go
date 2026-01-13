@@ -10,9 +10,11 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,13 +27,15 @@ import (
 var embeddedTemplates embed.FS
 
 type Server struct {
-	addr       string
-	localAddr  string
-	serverAddr string
-	repo       storage.RequestRepo
-	httpServer *http.Server
-	templates  *template.Template
-	httpClient *http.Client
+	addr          string
+	localAddr     string
+	serverAddr    string
+	repo          storage.RequestRepo
+	httpServer    *http.Server
+	listener      net.Listener
+	templates     *template.Template
+	httpClient    *http.Client
+	readyCallback func()
 }
 
 type ServerConfig struct {
@@ -135,17 +139,37 @@ func (s *Server) testHandler() http.Handler {
 	return s.buildMux()
 }
 
+func (s *Server) SetReadyCallback(cb func()) {
+	s.readyCallback = cb
+}
+
+func (s *Server) Addr() string {
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
+}
+
 func (s *Server) Start(ctx context.Context) error {
 	mux := s.buildMux()
 
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("dashboard listen: %w", err)
+	}
+	s.listener = ln
+
 	s.httpServer = &http.Server{
-		Addr:    s.addr,
 		Handler: mux,
+	}
+
+	if s.readyCallback != nil {
+		s.readyCallback()
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- s.httpServer.ListenAndServe()
+		errCh <- s.httpServer.Serve(ln)
 	}()
 
 	select {
@@ -212,8 +236,43 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	requests, err := s.repo.ListAll(limit)
+	if err != nil {
+		writeJSONError(w, fmt.Sprintf("fetch requests: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	apiReqs := make([]APIRequest, len(requests))
+	for i, req := range requests {
+		apiReqs[i] = APIRequest{
+			ID:              req.ID,
+			TunnelID:        req.TunnelID,
+			Timestamp:       req.Timestamp,
+			Method:          req.Method,
+			URL:             req.URL,
+			RequestHeaders:  req.RequestHeaders,
+			RequestBody:     string(req.RequestBody),
+			StatusCode:      req.StatusCode,
+			ResponseHeaders: req.ResponseHeaders,
+			ResponseBody:    string(req.ResponseBody),
+			DurationMs:      req.DurationMs,
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
+	json.NewEncoder(w).Encode(APIRequestsResponse{Requests: apiReqs})
 }
 
 func toRequestView(req *storage.Request) RequestView {
@@ -283,6 +342,24 @@ type ReplayResponse struct {
 	StatusCode int               `json:"status_code"`
 	Headers    map[string]string `json:"headers"`
 	Body       string            `json:"body"`
+}
+
+type APIRequest struct {
+	ID              string            `json:"id"`
+	TunnelID        string            `json:"tunnel_id"`
+	Timestamp       int64             `json:"timestamp"`
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	RequestHeaders  map[string]string `json:"request_headers"`
+	RequestBody     string            `json:"request_body"`
+	StatusCode      int               `json:"status_code"`
+	ResponseHeaders map[string]string `json:"response_headers"`
+	ResponseBody    string            `json:"response_body"`
+	DurationMs      int64             `json:"duration_ms"`
+}
+
+type APIRequestsResponse struct {
+	Requests []APIRequest `json:"requests"`
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {

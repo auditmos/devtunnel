@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/oklog/ulid/v2"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 type SharedBlob struct {
@@ -43,11 +47,17 @@ type Server struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 
-	httpServer *http.Server
-	listener   net.Listener
+	httpServer  *http.Server
+	httpsServer *http.Server
+	listener    net.Listener
+	tlsListener net.Listener
 
-	blobRepo  BlobRepo
-	templates *template.Template
+	blobRepo      BlobRepo
+	templates     *template.Template
+	certManager   *autocert.Manager
+	enableHTTPS   bool
+	certsDir      string
+	readyCallback func()
 }
 
 type Session struct {
@@ -58,25 +68,70 @@ type Session struct {
 }
 
 type ServerConfig struct {
-	Addr     string
-	Domain   string
-	BlobRepo BlobRepo
+	Addr        string
+	Domain      string
+	BlobRepo    BlobRepo
+	AutoDomain  bool
+	EnableHTTPS bool
+	CertsDir    string
 }
 
 func NewServer(cfg ServerConfig) *Server {
 	tmpl, _ := template.ParseFS(serverTemplates, "templates/*.html")
 
+	domain := cfg.Domain
+	if domain == "" && cfg.AutoDomain {
+		if detected, err := AutoDetectDomain(); err == nil {
+			domain = detected
+		}
+	}
+
+	certsDir := cfg.CertsDir
+	if certsDir == "" && cfg.EnableHTTPS {
+		if home, err := os.UserHomeDir(); err == nil {
+			certsDir = filepath.Join(home, ".devtunnel", "certs")
+		}
+	}
+
 	s := &Server{
-		addr:      cfg.Addr,
-		domain:    cfg.Domain,
-		sessions:  make(map[string]*Session),
-		blobRepo:  cfg.BlobRepo,
-		templates: tmpl,
+		addr:        cfg.Addr,
+		domain:      domain,
+		sessions:    make(map[string]*Session),
+		blobRepo:    cfg.BlobRepo,
+		templates:   tmpl,
+		enableHTTPS: cfg.EnableHTTPS,
+		certsDir:    certsDir,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
+
+	if cfg.EnableHTTPS && domain != "" {
+		if err := os.MkdirAll(certsDir, 0700); err != nil {
+			log.Printf("warning: failed to create certs dir: %v", err)
+		}
+		s.certManager = &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Cache:      autocert.DirCache(certsDir),
+			HostPolicy: s.hostPolicy,
+		}
+	}
+
 	return s
+}
+
+func (s *Server) hostPolicy(_ context.Context, host string) error {
+	if s.domain == "" {
+		return nil
+	}
+	if host == s.domain || strings.HasSuffix(host, "."+s.domain) {
+		return nil
+	}
+	return fmt.Errorf("host %q not allowed", host)
+}
+
+func (s *Server) SetReadyCallback(cb func()) {
+	s.readyCallback = cb
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -87,6 +142,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/share", s.handleShare)
 	mux.HandleFunc("/api/blob/", s.handleGetBlob)
 	mux.HandleFunc("/shared/", s.handleSharedView)
+	mux.HandleFunc("/", s.handleSubdomainProxy)
+
+	var handler http.Handler = mux
+	if s.certManager != nil {
+		handler = s.certManager.HTTPHandler(mux)
+	}
 
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -95,14 +156,28 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = ln
 
 	s.httpServer = &http.Server{
-		Handler: mux,
+		Handler: handler,
+	}
+
+	if s.readyCallback != nil {
+		s.readyCallback()
 	}
 
 	log.Printf("Server listening on %s", s.addr)
 
+	if s.enableHTTPS && s.certManager != nil {
+		go s.startHTTPS(ctx, mux)
+		log.Printf("Public URL: https://*.%s", s.domain)
+	} else if s.domain != "" {
+		log.Printf("Public URL: http://*.%s", s.domain)
+	}
+
 	go func() {
 		<-ctx.Done()
 		s.httpServer.Shutdown(context.Background())
+		if s.httpsServer != nil {
+			s.httpsServer.Shutdown(context.Background())
+		}
 	}()
 
 	if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -111,11 +186,40 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) startHTTPS(ctx context.Context, mux *http.ServeMux) {
+	tlsConfig := &tls.Config{
+		GetCertificate: s.certManager.GetCertificate,
+		NextProtos:     []string{"h2", "http/1.1"},
+	}
+
+	tlsLn, err := tls.Listen("tcp", ":443", tlsConfig)
+	if err != nil {
+		log.Printf("HTTPS listen failed (fallback to HTTP): %v", err)
+		return
+	}
+	s.tlsListener = tlsLn
+
+	s.httpsServer = &http.Server{
+		Handler:   mux,
+		TLSConfig: tlsConfig,
+	}
+
+	log.Printf("HTTPS listening on :443")
+
+	if err := s.httpsServer.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
+		log.Printf("HTTPS serve error: %v", err)
+	}
+}
+
 func (s *Server) Addr() string {
 	if s.listener == nil {
 		return ""
 	}
 	return s.listener.Addr().String()
+}
+
+func (s *Server) Domain() string {
+	return s.domain
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -233,10 +337,16 @@ func (s *Server) SessionCount() int {
 }
 
 func (s *Server) Close() error {
+	var err error
 	if s.httpServer != nil {
-		return s.httpServer.Close()
+		err = s.httpServer.Close()
 	}
-	return nil
+	if s.httpsServer != nil {
+		if e := s.httpsServer.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +369,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.proxyToTunnel(w, r, sess, targetPath)
+}
+
+func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Session, targetPath string) {
 	stream, err := sess.Session.Open()
 	if err != nil {
 		log.Printf("proxy open stream: %v", err)
@@ -308,6 +422,46 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(respFrame.StatusCode)
 	w.Write(respFrame.Body)
+}
+
+func (s *Server) extractSubdomainFromHost(host string) string {
+	host = strings.Split(host, ":")[0]
+	if s.domain == "" {
+		return ""
+	}
+	suffix := "." + s.domain
+	if !strings.HasSuffix(host, suffix) {
+		return ""
+	}
+	subdomain := strings.TrimSuffix(host, suffix)
+	if strings.Contains(subdomain, ".") {
+		return ""
+	}
+	return subdomain
+}
+
+func (s *Server) handleSubdomainProxy(w http.ResponseWriter, r *http.Request) {
+	subdomain := s.extractSubdomainFromHost(r.Host)
+	if subdomain == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	sess := s.GetSession(subdomain)
+	if sess == nil {
+		http.Error(w, "tunnel not found", http.StatusBadGateway)
+		return
+	}
+
+	targetPath := r.URL.Path
+	if targetPath == "" {
+		targetPath = "/"
+	}
+	if r.URL.RawQuery != "" {
+		targetPath += "?" + r.URL.RawQuery
+	}
+
+	s.proxyToTunnel(w, r, sess, targetPath)
 }
 
 type ShareRequest struct {

@@ -474,3 +474,281 @@ func getFirstSession(srv *Server) *Session {
 	}
 	return nil
 }
+
+func TestServerReadySignal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan struct{})
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	srv.SetReadyCallback(func() { close(ready) })
+
+	go srv.Start(ctx)
+
+	select {
+	case <-ready:
+		assert.NotEmpty(t, srv.Addr())
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not signal ready")
+	}
+}
+
+func TestServerPortConflict(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv1 := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	ready1 := make(chan struct{})
+	srv1.SetReadyCallback(func() { close(ready1) })
+
+	go srv1.Start(ctx)
+
+	select {
+	case <-ready1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first server did not start")
+	}
+
+	addr := srv1.Addr()
+
+	srv2 := NewServer(ServerConfig{Addr: addr, Domain: "test.local"})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv2.Start(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "address already in use")
+	case <-time.After(2 * time.Second):
+		t.Fatal("port conflict not detected")
+	}
+}
+
+func TestServerReadyBeforeURLPrinted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+
+	addrReady := make(chan string, 1)
+	srv.SetReadyCallback(func() {
+		addrReady <- srv.Addr()
+	})
+
+	go srv.Start(ctx)
+
+	select {
+	case addr := <-addrReady:
+		assert.NotEmpty(t, addr)
+		assert.NotEqual(t, ":0", addr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ready callback not invoked")
+	}
+}
+
+func TestSubdomainHostRouting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Routed-Via", "subdomain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("subdomain routed"))
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/test-path", nil)
+	req.Host = sess.Subdomain + ".test.local"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "subdomain routed", string(body))
+	assert.Equal(t, "subdomain", resp.Header.Get("X-Routed-Via"))
+}
+
+func TestSubdomainHostRoutingWithQueryString(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var receivedPath string
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.RequestURI()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/api/data?foo=bar&baz=qux", nil)
+	req.Host = sess.Subdomain + ".test.local"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "/api/data?foo=bar&baz=qux", receivedPath)
+}
+
+func TestSubdomainHostRoutingInvalidHost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/", nil)
+	req.Host = "subdomain.wrong.domain"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSubdomainHostRoutingMissingSubdomain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/", nil)
+	req.Host = "test.local"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSubdomainHostRoutingNestedSubdomain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/", nil)
+	req.Host = "nested.subdomain.test.local"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestSubdomainHostRoutingNoTunnel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/", nil)
+	req.Host = "nonexistent.test.local"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestSubdomainHostRoutingWithPort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer localServer.Close()
+
+	localPort := localServer.URL[len("http://127.0.0.1:"):]
+
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", Domain: "test.local"})
+	go srv.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(ClientConfig{
+		ServerAddr: srv.Addr(),
+		LocalPort:  localPort,
+	})
+	client.SetReconnect(false)
+
+	err := client.Connect(ctx)
+	require.NoError(t, err)
+	defer client.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sess := getFirstSession(srv)
+	require.NotNil(t, sess)
+
+	req, _ := http.NewRequest("GET", "http://"+srv.Addr()+"/", nil)
+	req.Host = sess.Subdomain + ".test.local:8080"
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "ok", string(body))
+}

@@ -116,3 +116,14 @@ func TestReplayRequiresURL(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "url argument required")
 }
+
+func TestClientJSONFlagExists(t *testing.T) {
+	cmd := clientCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if bf, ok := f.(*cli.BoolFlag); ok && bf.Name == "json" {
+			found = true
+		}
+	}
+	assert.True(t, found, "json flag not found")
+}

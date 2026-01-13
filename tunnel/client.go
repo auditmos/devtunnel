@@ -81,6 +81,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	return c.connectWithBackoff(ctx)
 }
 
+func (c *Client) Wait(ctx context.Context) {
+	<-ctx.Done()
+}
+
 func (c *Client) connectWithBackoff(ctx context.Context) error {
 	backoff := 1 * time.Second
 
