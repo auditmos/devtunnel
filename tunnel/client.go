@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/auditmos/devtunnel/logging"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 )
@@ -47,21 +48,28 @@ type Client struct {
 	onConnected  func(publicURL string)
 	onDisconnect func(err error)
 	logger       RequestLogger
+	log          logging.Logger
 }
 
 type ClientConfig struct {
 	ServerAddr string
 	LocalPort  string
 	Subdomain  string
+	Logger     logging.Logger
 }
 
 func NewClient(cfg ClientConfig) *Client {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = logging.NopLogger{}
+	}
 	return &Client{
 		serverAddr: cfg.ServerAddr,
 		localPort:  cfg.LocalPort,
 		subdomain:  cfg.Subdomain,
 		reconnect:  true,
 		maxBackoff: 60 * time.Second,
+		log:        logger,
 	}
 }
 

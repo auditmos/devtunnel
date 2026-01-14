@@ -11,3 +11,24 @@ Tests: 26 tests in logging/*_test.go - all pass
 Build: go build ./... OK
 
 Next: CLI Logging Configuration Flags (--json, --log-level, --log-file)
+
+## 2026-01-14: CLI Logging Configuration Flags - DONE
+
+Added flags to both client and server commands:
+- --json: output JSONL format
+- --log-level: debug/info/warn/error (default: info)
+- --log-file: write to file (default: stdout)
+
+Changes:
+- cmd/devtunnel/main.go: added initLogger() helper, updated runServer/runClient signatures
+- tunnel/server.go: added Logger to ServerConfig, stores in Server struct
+- tunnel/client.go: added Logger to ClientConfig, stores as log field
+- dashboard/server.go: added Logger to ServerConfig, stores in Server struct
+
+Tests: 12 new tests in cmd/devtunnel/main_test.go for flag existence and initLogger behavior
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Note: log.Printf calls still remain in tunnel/client.go and tunnel/server.go. Replacement is next PRD item.
+
+Next: Client Structured Logging Integration

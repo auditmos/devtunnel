@@ -18,6 +18,7 @@ import (
 
 	"github.com/auditmos/devtunnel/crypto"
 	"github.com/auditmos/devtunnel/dashboard"
+	"github.com/auditmos/devtunnel/logging"
 	"github.com/auditmos/devtunnel/storage"
 	"github.com/auditmos/devtunnel/tunnel"
 	"github.com/oklog/ulid/v2"
@@ -74,13 +75,29 @@ func serverCommand() *cli.Command {
 				Name:  "certs-dir",
 				Usage: "certificate cache directory (default: ~/.devtunnel/certs)",
 			},
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "output logs in JSONL format",
+			},
+			&cli.StringFlag{
+				Name:  "log-level",
+				Value: "info",
+				Usage: "log level (debug, info, warn, error)",
+			},
+			&cli.StringFlag{
+				Name:  "log-file",
+				Usage: "log file path (default: stdout)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			port := c.Int("port")
 			domain := c.String("domain")
 			https := c.Bool("https")
 			certsDir := c.String("certs-dir")
-			return runServer(port, domain, https, certsDir)
+			jsonOutput := c.Bool("json")
+			logLevel := c.String("log-level")
+			logFile := c.String("log-file")
+			return runServer(port, domain, https, certsDir, jsonOutput, logLevel, logFile)
 		},
 	}
 }
@@ -109,7 +126,16 @@ func clientCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:  "json",
-				Usage: "output logs to stdout in JSONL format",
+				Usage: "output logs in JSONL format",
+			},
+			&cli.StringFlag{
+				Name:  "log-level",
+				Value: "info",
+				Usage: "log level (debug, info, warn, error)",
+			},
+			&cli.StringFlag{
+				Name:  "log-file",
+				Usage: "log file path (default: stdout)",
 			},
 			&cli.StringFlag{
 				Name:  "dashboard-addr",
@@ -125,8 +151,10 @@ func clientCommand() *cli.Command {
 			server := c.String("server")
 			safe := c.Bool("safe")
 			jsonOutput := c.Bool("json")
+			logLevel := c.String("log-level")
+			logFile := c.String("log-file")
 			dashboardAddr := c.String("dashboard-addr")
-			return runClient(port, server, safe, jsonOutput, dashboardAddr)
+			return runClient(port, server, safe, jsonOutput, logLevel, logFile, dashboardAddr)
 		},
 	}
 }
@@ -155,16 +183,22 @@ func replayCommand() *cli.Command {
 	}
 }
 
-func runServer(port int, domain string, https bool, certsDir string) error {
+func runServer(port int, domain string, https bool, certsDir string, jsonOutput bool, logLevel, logFile string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	logger, logCleanup, err := initLogger(jsonOutput, logLevel, logFile, false)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	defer logCleanup()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
-		fmt.Println("\nShutting down...")
+		logger.Info("server", "shutdown", "Shutting down")
 		cancel()
 	}()
 
@@ -214,10 +248,11 @@ func runServer(port int, domain string, https bool, certsDir string) error {
 		Version:        version,
 		RequestsPerMin: limits.RequestsPerMin,
 		MaxConns:       limits.MaxConcurrentConns,
+		Logger:         logger,
 	})
 
 	srv.SetReadyCallback(func() {
-		fmt.Printf("Server ready on %s\n", srv.Addr())
+		logger.WithFields(logging.Fields{"addr": srv.Addr()}).Info("server", "start", "Server ready")
 	})
 
 	return srv.Start(ctx)
@@ -235,21 +270,27 @@ func getServerDBPath() (string, error) {
 	return filepath.Join(dir, "server.db"), nil
 }
 
-func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string) error {
+func runClient(port, server string, safe, jsonOutput bool, logLevel, logFile, dashboardAddr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	logger, logCleanup, err := initLogger(jsonOutput, logLevel, logFile, safe)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	defer logCleanup()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
-		fmt.Println("\nDisconnecting...")
+		logger.Info("client", "disconnect", "Disconnecting")
 		cancel()
 	}()
 
 	if safe {
-		fmt.Println("Safe mode enabled: sensitive headers will be scrubbed")
+		logger.Info("client", "config", "Safe mode enabled")
 	}
 
 	dbPath, err := getDBPath()
@@ -282,13 +323,13 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 	tunnelID := ulid.Make().String()
 	dbLogger := storage.NewDBLogger(repo, tunnelID, scrubber)
 
-	var logger tunnel.RequestLogger = dbLogger
+	var reqLogger tunnel.RequestLogger = dbLogger
 	if jsonOutput {
 		jsonLogger := storage.NewJSONLogger(os.Stdout, scrubber)
-		logger = storage.NewMultiLogger(dbLogger, jsonLogger)
+		reqLogger = storage.NewMultiLogger(dbLogger, jsonLogger)
 	}
 
-	fmt.Printf("Request logging enabled: %s\n", dbPath)
+	logger.WithFields(logging.Fields{"db_path": dbPath}).Info("client", "config", "Request logging enabled")
 
 	overridesDir := filepath.Join(filepath.Dir(dbPath), "overrides")
 	dashSrv, err := dashboard.NewServer(dashboard.ServerConfig{
@@ -298,31 +339,33 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 		OverridesDir:  overridesDir,
 		LocalAddr:     "localhost:" + port,
 		ServerAddr:    server,
+		Logger:        logger,
 	})
 	if err != nil {
 		return fmt.Errorf("init dashboard: %w", err)
 	}
 
 	dashSrv.SetReadyCallback(func() {
-		fmt.Printf("Dashboard: http://%s\n", dashSrv.Addr())
+		logger.WithFields(logging.Fields{"addr": dashSrv.Addr()}).Info("dashboard", "start", "Dashboard started")
 	})
 
 	go func() {
 		if dashErr := dashSrv.Start(ctx); dashErr != nil {
-			fmt.Printf("Dashboard error: %v\n", dashErr)
+			logger.WithError(dashErr).Error("dashboard", "error", "Dashboard error")
 		}
 	}()
 
 	client := tunnel.NewClient(tunnel.ClientConfig{
 		ServerAddr: server,
 		LocalPort:  port,
+		Logger:     logger,
 	})
 
-	client.SetLogger(logger)
+	client.SetLogger(reqLogger)
 
 	client.OnConnected(func(publicURL string) {
-		fmt.Printf("Forwarding %s -> localhost:%s\n", publicURL, port)
 		subdomain := extractSubdomain(publicURL)
+		logger.WithFields(logging.Fields{"public_url": publicURL, "local_port": port}).Info("client", "connect", "Forwarding")
 		t := &storage.Tunnel{
 			ID:        tunnelID,
 			Subdomain: subdomain,
@@ -330,12 +373,12 @@ func runClient(port, server string, safe, jsonOutput bool, dashboardAddr string)
 			Status:    "active",
 		}
 		if err := tunnelRepo.Save(t); err != nil {
-			fmt.Printf("save tunnel: %v\n", err)
+			logger.WithError(err).Error("client", "tunnel_save", "Failed to save tunnel")
 		}
 	})
 
 	client.OnDisconnect(func(err error) {
-		fmt.Printf("Disconnected: %v\n", err)
+		logger.WithError(err).Warn("client", "disconnect", "Disconnected")
 		if updateErr := tunnelRepo.UpdateStatus(tunnelID, "disconnected", time.Now().UnixMilli()); updateErr != nil {
 			fmt.Printf("update tunnel status: %v\n", updateErr)
 		}
@@ -495,4 +538,36 @@ func (a *blobRepoAdapter) Get(id string) (*tunnel.SharedBlob, error) {
 		CreatedAt:  b.CreatedAt,
 		ExpiresAt:  b.ExpiresAt,
 	}, nil
+}
+
+func initLogger(jsonOutput bool, logLevel, logFile string, sanitize bool) (logging.Logger, func(), error) {
+	level := logging.ParseLevel(logLevel)
+
+	var out io.Writer = os.Stdout
+	var cleanup = func() {}
+
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open log file: %w", err)
+		}
+		out = f
+		cleanup = func() { f.Close() }
+	}
+
+	var formatter logging.Formatter
+	if jsonOutput {
+		formatter = &logging.JSONFormatter{}
+	} else {
+		formatter = logging.NewHumanFormatter(out)
+	}
+
+	logger := logging.NewLogger(logging.LoggerConfig{
+		Output:    out,
+		Formatter: formatter,
+		Level:     level,
+		Sanitize:  sanitize,
+	})
+
+	return logger, cleanup, nil
 }

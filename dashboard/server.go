@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/auditmos/devtunnel/crypto"
+	"github.com/auditmos/devtunnel/logging"
 	"github.com/auditmos/devtunnel/storage"
 	"github.com/oklog/ulid/v2"
 )
@@ -37,6 +38,7 @@ type Server struct {
 	templates     *template.Template
 	httpClient    *http.Client
 	readyCallback func()
+	logger        logging.Logger
 }
 
 type ServerConfig struct {
@@ -46,6 +48,7 @@ type ServerConfig struct {
 	OverridesDir  string
 	LocalAddr     string
 	ServerAddr    string
+	Logger        logging.Logger
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -54,12 +57,18 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		localAddr = "localhost:3000"
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		logger = logging.NopLogger{}
+	}
+
 	s := &Server{
 		addr:          cfg.Addr,
 		localAddr:     localAddr,
 		serverAddr:    cfg.ServerAddr,
 		repo:          cfg.Repo,
 		scrubRuleRepo: cfg.ScrubRuleRepo,
+		logger:        logger,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},

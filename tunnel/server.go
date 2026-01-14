@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/auditmos/devtunnel/logging"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/oklog/ulid/v2"
@@ -60,6 +61,7 @@ type Server struct {
 	readyCallback func()
 	version       string
 	rateLimiter   *RateLimiter
+	logger        logging.Logger
 }
 
 type Session struct {
@@ -79,6 +81,7 @@ type ServerConfig struct {
 	Version        string
 	RequestsPerMin int
 	MaxConns       int
+	Logger         logging.Logger
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -112,6 +115,11 @@ func NewServer(cfg ServerConfig) *Server {
 		maxConns = 5
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		logger = logging.NopLogger{}
+	}
+
 	s := &Server{
 		addr:        cfg.Addr,
 		domain:      domain,
@@ -122,6 +130,7 @@ func NewServer(cfg ServerConfig) *Server {
 		certsDir:    certsDir,
 		version:     ver,
 		rateLimiter: NewRateLimiter(reqPerMin, maxConns),
+		logger:      logger,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -129,7 +138,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	if cfg.EnableHTTPS && domain != "" {
 		if err := os.MkdirAll(certsDir, 0700); err != nil {
-			log.Printf("warning: failed to create certs dir: %v", err)
+			logger.WithError(err).Warn("server", "config", "Failed to create certs dir")
 		}
 		s.certManager = &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,

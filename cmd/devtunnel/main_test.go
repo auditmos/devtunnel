@@ -37,7 +37,7 @@ func TestClientCommand(t *testing.T) {
 		if cmd.Name == "start" {
 			found = true
 			assert.Equal(t, "expose local port to the internet", cmd.Usage)
-			assert.Equal(t, "<port>", cmd.ArgsUsage)
+			assert.Equal(t, "[port]", cmd.ArgsUsage)
 		}
 	}
 	assert.True(t, found, "start command not found")
@@ -61,11 +61,14 @@ func TestServerCommandParsing(t *testing.T) {
 	assert.NotNil(t, cmd.Action)
 }
 
-func TestClientRequiresPort(t *testing.T) {
-	app := NewApp()
-	err := app.Run([]string{"devtunnel", "start"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "port argument required")
+func TestClientPortOptional(t *testing.T) {
+	cmd := clientCommand()
+	assert.Equal(t, "[port]", cmd.ArgsUsage)
+	for _, f := range cmd.Flags {
+		if sf, ok := f.(*cli.StringFlag); ok && sf.Name == "port" {
+			assert.Equal(t, "3000", sf.Value)
+		}
+	}
 }
 
 func TestClientCommandParsing(t *testing.T) {
@@ -126,4 +129,97 @@ func TestClientJSONFlagExists(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "json flag not found")
+}
+
+func TestClientLogLevelFlagExists(t *testing.T) {
+	cmd := clientCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if sf, ok := f.(*cli.StringFlag); ok && sf.Name == "log-level" {
+			found = true
+			assert.Equal(t, "info", sf.Value)
+		}
+	}
+	assert.True(t, found, "log-level flag not found")
+}
+
+func TestClientLogFileFlagExists(t *testing.T) {
+	cmd := clientCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if sf, ok := f.(*cli.StringFlag); ok && sf.Name == "log-file" {
+			found = true
+			assert.Empty(t, sf.Value)
+		}
+	}
+	assert.True(t, found, "log-file flag not found")
+}
+
+func TestServerJSONFlagExists(t *testing.T) {
+	cmd := serverCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if bf, ok := f.(*cli.BoolFlag); ok && bf.Name == "json" {
+			found = true
+		}
+	}
+	assert.True(t, found, "json flag not found on server")
+}
+
+func TestServerLogLevelFlagExists(t *testing.T) {
+	cmd := serverCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if sf, ok := f.(*cli.StringFlag); ok && sf.Name == "log-level" {
+			found = true
+			assert.Equal(t, "info", sf.Value)
+		}
+	}
+	assert.True(t, found, "log-level flag not found on server")
+}
+
+func TestServerLogFileFlagExists(t *testing.T) {
+	cmd := serverCommand()
+	var found bool
+	for _, f := range cmd.Flags {
+		if sf, ok := f.(*cli.StringFlag); ok && sf.Name == "log-file" {
+			found = true
+			assert.Empty(t, sf.Value)
+		}
+	}
+	assert.True(t, found, "log-file flag not found on server")
+}
+
+func TestInitLoggerJSON(t *testing.T) {
+	logger, cleanup, err := initLogger(true, "info", "", false)
+	require.NoError(t, err)
+	defer cleanup()
+	assert.NotNil(t, logger)
+}
+
+func TestInitLoggerHuman(t *testing.T) {
+	logger, cleanup, err := initLogger(false, "info", "", false)
+	require.NoError(t, err)
+	defer cleanup()
+	assert.NotNil(t, logger)
+}
+
+func TestInitLoggerLevels(t *testing.T) {
+	tests := []string{"debug", "info", "warn", "error"}
+	for _, lvl := range tests {
+		t.Run(lvl, func(t *testing.T) {
+			logger, cleanup, err := initLogger(false, lvl, "", false)
+			require.NoError(t, err)
+			defer cleanup()
+			assert.NotNil(t, logger)
+		})
+	}
+}
+
+func TestInitLoggerToFile(t *testing.T) {
+	tmpFile := t.TempDir() + "/test.log"
+	logger, cleanup, err := initLogger(false, "info", tmpFile, false)
+	require.NoError(t, err)
+	defer cleanup()
+	assert.NotNil(t, logger)
 }
