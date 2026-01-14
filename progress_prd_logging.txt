@@ -54,3 +54,30 @@ Build: go build ./... OK
 Tests: go test ./... OK
 
 Next: Server Structured Logging Integration
+
+## 2026-01-14: Server Structured Logging Integration - DONE
+
+Replaced all log.Printf in tunnel/server.go with structured logging:
+- INFO [server] start: "Server listening" [addr, domain]
+- INFO [server] start: "HTTPS enabled" / "HTTP enabled" [public_url]
+- INFO [server] https: "HTTPS listening" [addr]
+- WARN [server] https: "HTTPS listen failed, fallback to HTTP" [error]
+- ERROR [server] https: "HTTPS serve error" [error]
+- ERROR [server] websocket: "Upgrade failed" [error]
+- ERROR [server] handshake: "Yamux server init failed" / "Accept stream failed" / "Handshake decode failed" / "Handshake response encode failed" [error]
+- WARN [server] connect: "Connection limit exceeded" [subdomain]
+- INFO [server] connect: "Client connected" [subdomain, public_url]
+- INFO [server] disconnect: "Client disconnected" [subdomain]
+- INFO [server] proxy: "Request proxied" [subdomain, method, path, trace_id]
+- ERROR [server] proxy: "Open stream failed" / "Read body failed" / "Encode request failed" / "Decode response failed" [subdomain, error, trace_id]
+- INFO [server] blob: "Blob saved" [blob_id, size]
+- ERROR [server] blob: "Blob save failed" / "Blob get failed" [blob_id, error]
+- ERROR [server] template: "Render failed" [template, error]
+
+Added trace_id generation in proxyToTunnel and propagate via RequestFrame.TraceID.
+
+Tests: 9 tests in tunnel/server_logging_test.go
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Next: Dashboard Structured Logging Integration

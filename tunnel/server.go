@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -194,13 +193,13 @@ func (s *Server) Start(ctx context.Context) error {
 		s.readyCallback()
 	}
 
-	log.Printf("Server listening on %s", s.addr)
+	s.logger.WithFields(logging.Fields{"addr": s.addr, "domain": s.domain}).Info("server", "start", "Server listening")
 
 	if s.enableHTTPS && s.certManager != nil {
 		go s.startHTTPS(ctx, mux)
-		log.Printf("Public URL: https://*.%s", s.domain)
+		s.logger.WithFields(logging.Fields{"public_url": fmt.Sprintf("https://*.%s", s.domain)}).Info("server", "start", "HTTPS enabled")
 	} else if s.domain != "" {
-		log.Printf("Public URL: http://*.%s", s.domain)
+		s.logger.WithFields(logging.Fields{"public_url": fmt.Sprintf("http://*.%s", s.domain)}).Info("server", "start", "HTTP enabled")
 	}
 
 	go func() {
@@ -225,7 +224,7 @@ func (s *Server) startHTTPS(ctx context.Context, mux *http.ServeMux) {
 
 	tlsLn, err := tls.Listen("tcp", ":443", tlsConfig)
 	if err != nil {
-		log.Printf("HTTPS listen failed (fallback to HTTP): %v", err)
+		s.logger.WithError(err).Warn("server", "https", "HTTPS listen failed, fallback to HTTP")
 		return
 	}
 	s.tlsListener = tlsLn
@@ -235,10 +234,10 @@ func (s *Server) startHTTPS(ctx context.Context, mux *http.ServeMux) {
 		TLSConfig: tlsConfig,
 	}
 
-	log.Printf("HTTPS listening on :443")
+	s.logger.WithFields(logging.Fields{"addr": ":443"}).Info("server", "https", "HTTPS listening")
 
 	if err := s.httpsServer.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
-		log.Printf("HTTPS serve error: %v", err)
+		s.logger.WithError(err).Error("server", "https", "HTTPS serve error")
 	}
 }
 
@@ -272,7 +271,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("websocket upgrade: %v", err)
+		s.logger.WithError(err).Error("server", "websocket", "Upgrade failed")
 		return
 	}
 
@@ -284,14 +283,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	session, err := yamux.Server(wsConn, cfg)
 	if err != nil {
-		log.Printf("yamux server: %v", err)
+		s.logger.WithError(err).Error("server", "handshake", "Yamux server init failed")
 		conn.Close()
 		return
 	}
 
 	stream, err := session.Accept()
 	if err != nil {
-		log.Printf("accept handshake stream: %v", err)
+		s.logger.WithError(err).Error("server", "handshake", "Accept stream failed")
 		session.Close()
 		return
 	}
@@ -299,7 +298,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var req HandshakeRequest
 	dec := json.NewDecoder(stream)
 	if err := dec.Decode(&req); err != nil {
-		log.Printf("decode handshake: %v", err)
+		s.logger.WithError(err).Error("server", "handshake", "Handshake decode failed")
 		stream.Close()
 		session.Close()
 		return
@@ -311,7 +310,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.rateLimiter != nil && !s.rateLimiter.AcquireConnection(subdomain) {
-		log.Printf("connection limit exceeded for subdomain: %s", subdomain)
+		s.logger.WithFields(logging.Fields{"subdomain": subdomain}).Warn("server", "connect", "Connection limit exceeded")
 		resp := HandshakeResponse{
 			Success: false,
 			Error:   "connection limit exceeded",
@@ -346,7 +345,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	enc := json.NewEncoder(stream)
 	if err := enc.Encode(&resp); err != nil {
-		log.Printf("encode handshake response: %v", err)
+		s.logger.WithError(err).Error("server", "handshake", "Handshake response encode failed")
 		s.removeSession(subdomain)
 		if s.rateLimiter != nil {
 			s.rateLimiter.ReleaseConnection(subdomain)
@@ -357,7 +356,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	stream.Close()
 
-	log.Printf("Client connected: %s -> %s", subdomain, publicURL)
+	s.logger.WithFields(logging.Fields{"subdomain": subdomain, "public_url": publicURL}).Info("server", "connect", "Client connected")
 
 	go s.monitorSession(sess)
 }
@@ -368,7 +367,7 @@ func (s *Server) monitorSession(sess *Session) {
 	if s.rateLimiter != nil {
 		s.rateLimiter.ReleaseConnection(sess.Subdomain)
 	}
-	log.Printf("Client disconnected: %s", sess.Subdomain)
+	s.logger.WithFields(logging.Fields{"subdomain": sess.Subdomain}).Info("server", "disconnect", "Client disconnected")
 }
 
 func (s *Server) removeSession(subdomain string) {
@@ -440,9 +439,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Session, targetPath string) {
+	traceID := ulid.Make().String()
+
 	stream, err := sess.Session.Open()
 	if err != nil {
-		log.Printf("proxy open stream: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"subdomain": sess.Subdomain, "trace_id": traceID}).Error("server", "proxy", "Open stream failed")
 		http.Error(w, "tunnel unavailable", http.StatusBadGateway)
 		return
 	}
@@ -450,6 +451,7 @@ func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Ses
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		s.logger.WithError(err).WithFields(logging.Fields{"subdomain": sess.Subdomain, "trace_id": traceID}).Error("server", "proxy", "Read body failed")
 		http.Error(w, "read body failed", http.StatusBadRequest)
 		return
 	}
@@ -467,11 +469,12 @@ func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Ses
 		URL:     targetPath,
 		Headers: headers,
 		Body:    body,
+		TraceID: traceID,
 	}
 
 	enc := json.NewEncoder(stream)
 	if err := enc.Encode(&reqFrame); err != nil {
-		log.Printf("proxy encode request: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"subdomain": sess.Subdomain, "trace_id": traceID}).Error("server", "proxy", "Encode request failed")
 		http.Error(w, "tunnel write failed", http.StatusBadGateway)
 		return
 	}
@@ -479,10 +482,17 @@ func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Ses
 	var respFrame ResponseFrame
 	dec := json.NewDecoder(stream)
 	if err := dec.Decode(&respFrame); err != nil {
-		log.Printf("proxy decode response: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"subdomain": sess.Subdomain, "trace_id": traceID}).Error("server", "proxy", "Decode response failed")
 		http.Error(w, "tunnel read failed", http.StatusBadGateway)
 		return
 	}
+
+	s.logger.WithFields(logging.Fields{
+		"subdomain": sess.Subdomain,
+		"method":    r.Method,
+		"path":      targetPath,
+		"trace_id":  traceID,
+	}).Info("server", "proxy", "Request proxied")
 
 	for k, v := range respFrame.Headers {
 		w.Header().Set(k, v)
@@ -583,10 +593,12 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.blobRepo.Save(blob); err != nil {
-		log.Printf("save blob: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"blob_id": blob.ID, "size": len(ciphertext)}).Error("server", "blob", "Blob save failed")
 		writeServerJSONError(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
+
+	s.logger.WithFields(logging.Fields{"blob_id": blob.ID, "size": len(ciphertext)}).Info("server", "blob", "Blob saved")
 
 	scheme := "http"
 	if r.TLS != nil {
@@ -614,7 +626,7 @@ func (s *Server) handleGetBlob(w http.ResponseWriter, r *http.Request) {
 
 	blob, err := s.blobRepo.Get(id)
 	if err != nil {
-		log.Printf("get blob: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"blob_id": id}).Error("server", "blob", "Blob get failed")
 		writeServerJSONError(w, "failed to get", http.StatusInternalServerError)
 		return
 	}
@@ -647,7 +659,7 @@ func (s *Server) handleSharedView(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.templates.ExecuteTemplate(w, "shared.html", SharedViewData{ID: id}); err != nil {
-		log.Printf("render shared: %v", err)
+		s.logger.WithError(err).WithFields(logging.Fields{"template": "shared.html"}).Error("server", "template", "Render failed")
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
