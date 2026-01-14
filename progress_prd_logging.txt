@@ -81,3 +81,23 @@ Build: go build ./... OK
 Tests: go test ./... OK
 
 Next: Dashboard Structured Logging Integration
+
+## 2026-01-14: Dashboard Structured Logging Integration - DONE
+
+Added structured logging to dashboard/server.go:
+- INFO [dashboard] start: "Dashboard started" [addr]
+- INFO [dashboard] api: "Request received" [method, path, trace_id]
+- ERROR [dashboard] api: "Request failed" [error, path, trace_id]
+- INFO [dashboard] replay: "Request replayed" [request_id, status_code, duration_ms, trace_id]
+- ERROR [dashboard] replay: "Replay failed" [request_id, error, trace_id]
+- INFO [dashboard] share: "Request shared" [request_id, blob_id, trace_id]
+- ERROR [dashboard] share: "Upload failed" / "Server error" [request_id, error, trace_id]
+- ERROR [dashboard] template: "Render failed" [template, error, trace_id]
+
+Added trace_id (ULID) generation at entry points for all handlers.
+
+Tests: 6 new tests in dashboard/server_logging_test.go
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Next: Action Tracing with Trace IDs

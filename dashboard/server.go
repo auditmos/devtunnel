@@ -177,6 +177,10 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler: mux,
 	}
 
+	s.logger.WithFields(logging.Fields{
+		"addr": ln.Addr().String(),
+	}).Info("dashboard", "start", "Dashboard started")
+
 	if s.readyCallback != nil {
 		s.readyCallback()
 	}
@@ -221,6 +225,8 @@ type IndexData struct {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	traceID := ulid.Make().String()
+
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -228,6 +234,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	requests, err := s.repo.ListAll(10)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"path":     r.URL.Path,
+			"trace_id": traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		http.Error(w, "failed to load requests", http.StatusInternalServerError)
 		return
 	}
@@ -245,11 +255,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	if err := s.templates.ExecuteTemplate(w, "layout", data); err != nil {
+		s.logger.WithFields(logging.Fields{
+			"template": "layout",
+			"trace_id": traceID,
+		}).WithError(err).Error("dashboard", "template", "Render failed")
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
 func (s *Server) handleAPIRequests(w http.ResponseWriter, r *http.Request) {
+	traceID := ulid.Make().String()
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -264,9 +280,19 @@ func (s *Server) handleAPIRequests(w http.ResponseWriter, r *http.Request) {
 
 	requests, err := s.repo.ListAll(limit)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"path":     r.URL.Path,
+			"trace_id": traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("fetch requests: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	s.logger.WithFields(logging.Fields{
+		"method":   r.Method,
+		"path":     r.URL.Path,
+		"trace_id": traceID,
+	}).Info("dashboard", "api", "Request received")
 
 	apiReqs := make([]APIRequest, len(requests))
 	for i, req := range requests {
@@ -377,6 +403,8 @@ type APIRequestsResponse struct {
 }
 
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
+	traceID := ulid.Make().String()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -390,6 +418,10 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 	storedReq, err := s.repo.Get(id)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("fetch request: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -403,6 +435,10 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("http://%s%s", s.localAddr, storedReq.URL)
 	req, err := http.NewRequest(storedReq.Method, url, bytes.NewReader(storedReq.RequestBody))
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("create request: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -413,6 +449,10 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "replay", "Replay failed")
 		writeJSONError(w, fmt.Sprintf("replay request: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -422,6 +462,10 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("read response: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -445,9 +489,20 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		DurationMs:      duration.Milliseconds(),
 	}
 	if saveErr := s.repo.Save(newReq); saveErr != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(saveErr).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("save request: %v", saveErr), http.StatusInternalServerError)
 		return
 	}
+
+	s.logger.WithFields(logging.Fields{
+		"request_id":  id,
+		"status_code": resp.StatusCode,
+		"duration_ms": duration.Milliseconds(),
+		"trace_id":    traceID,
+	}).Info("dashboard", "replay", "Request replayed")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ReplayResponse{
@@ -479,6 +534,8 @@ type ShareResponse struct {
 }
 
 func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	traceID := ulid.Make().String()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -497,6 +554,10 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	storedReq, err := s.repo.Get(id)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, fmt.Sprintf("fetch request: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -518,18 +579,30 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	plaintext, err := json.Marshal(shareable)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, "marshal failed", http.StatusInternalServerError)
 		return
 	}
 
 	key, err := crypto.GenerateKey()
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, "key generation failed", http.StatusInternalServerError)
 		return
 	}
 
 	ciphertext, err := crypto.Encrypt(plaintext, key)
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, "encryption failed", http.StatusInternalServerError)
 		return
 	}
@@ -541,6 +614,10 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.httpClient.Post(serverURL, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "share", "Upload failed")
 		writeJSONError(w, fmt.Sprintf("upload failed: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -548,6 +625,11 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		s.logger.WithFields(logging.Fields{
+			"request_id":  id,
+			"status_code": resp.StatusCode,
+			"trace_id":    traceID,
+		}).Error("dashboard", "share", "Server error")
 		writeJSONError(w, fmt.Sprintf("server error: %s", body), resp.StatusCode)
 		return
 	}
@@ -557,11 +639,21 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&serverResp); err != nil {
+		s.logger.WithFields(logging.Fields{
+			"request_id": id,
+			"trace_id":   traceID,
+		}).WithError(err).Error("dashboard", "api", "Request failed")
 		writeJSONError(w, "invalid server response", http.StatusInternalServerError)
 		return
 	}
 
 	shareURL := serverResp.URL + "#" + crypto.EncodeKey(key)
+
+	s.logger.WithFields(logging.Fields{
+		"request_id": id,
+		"blob_id":    serverResp.ID,
+		"trace_id":   traceID,
+	}).Info("dashboard", "share", "Request shared")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ShareResponse{URL: shareURL})
