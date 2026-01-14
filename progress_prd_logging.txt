@@ -1,0 +1,13 @@
+## 2026-01-14: Core Structured Logging Infrastructure - DONE
+
+Created logging/ package with:
+- logging/levels.go: LogLevel (DEBUG/INFO/WARN/ERROR), ParseLevel(), ShouldLog()
+- logging/fields.go: Fields map, WithField/WithFields/WithError, Sanitize() for sensitive keys
+- logging/entry.go: LogEntry struct (timestamp, level, component, action, message, fields, error, trace_id)
+- logging/formatter.go: JSONFormatter (JSONL, RFC3339 timestamps), HumanFormatter (TTY colors via go-isatty)
+- logging/logger.go: Logger interface, StandardLogger (thread-safe, level filtering, sanitization), NopLogger
+
+Tests: 26 tests in logging/*_test.go - all pass
+Build: go build ./... OK
+
+Next: CLI Logging Configuration Flags (--json, --log-level, --log-file)
