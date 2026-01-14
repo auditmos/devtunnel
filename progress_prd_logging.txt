@@ -32,3 +32,25 @@ Tests: go test ./... OK
 Note: log.Printf calls still remain in tunnel/client.go and tunnel/server.go. Replacement is next PRD item.
 
 Next: Client Structured Logging Integration
+
+## 2026-01-14: Client Structured Logging Integration - DONE
+
+Replaced all log.Printf calls in tunnel/client.go with structured logging:
+- INFO [client] connect: "Connecting to server" [server_addr]
+- INFO [client] connect: "Connected" [public_url, subdomain]
+- ERROR [client] connect: "Connection failed" [error, retry_in]
+- INFO [client] forward: "Request forwarded" [method, url, status_code, duration_ms, request_id]
+- ERROR [client] forward: "Failed to forward/decode/create/read/encode" [error, ...]
+- WARN [client] disconnect: "Connection lost"
+- INFO [client] reconnect: "Reconnecting"
+
+Changes:
+- tunnel/client.go: removed "log" import, use c.log (logging.Logger)
+- tunnel/protocol.go: added TraceID field to RequestFrame
+- tunnel/client_logging_test.go: 8 new tests for client log output
+
+Tests: 8 tests in client_logging_test.go
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Next: Server Structured Logging Integration

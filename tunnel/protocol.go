@@ -24,6 +24,7 @@ type RequestFrame struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
 	Body    []byte            `json:"body"`
+	TraceID string            `json:"trace_id,omitempty"`
 }
 
 type ResponseFrame struct {

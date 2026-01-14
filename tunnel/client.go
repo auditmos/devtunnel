@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -112,7 +111,9 @@ func (c *Client) connectWithBackoff(ctx context.Context) error {
 		case <-time.After(backoff):
 		}
 
-		log.Printf("connect failed: %v, retry in %v", err, backoff)
+		c.log.WithError(err).WithFields(logging.Fields{
+			"retry_in": backoff.String(),
+		}).Error("client", "connect", "Connection failed")
 		backoff *= 2
 		if backoff > c.maxBackoff {
 			backoff = c.maxBackoff
@@ -121,6 +122,10 @@ func (c *Client) connectWithBackoff(ctx context.Context) error {
 }
 
 func (c *Client) connect(ctx context.Context) error {
+	c.log.WithFields(logging.Fields{
+		"server_addr": c.serverAddr,
+	}).Info("client", "connect", "Connecting to server")
+
 	u := url.URL{Scheme: "ws", Host: c.serverAddr, Path: "/connect"}
 
 	dialer := websocket.Dialer{
@@ -184,7 +189,10 @@ func (c *Client) connect(ctx context.Context) error {
 	c.connected = true
 	c.mu.Unlock()
 
-	log.Printf("Connected: %s", resp.PublicURL)
+	c.log.WithFields(logging.Fields{
+		"public_url": resp.PublicURL,
+		"subdomain":  resp.Subdomain,
+	}).Info("client", "connect", "Connected")
 
 	if c.onConnected != nil {
 		c.onConnected(resp.PublicURL)
@@ -212,7 +220,8 @@ func (c *Client) monitorConnection(ctx context.Context) {
 		}
 
 		if c.reconnect {
-			log.Printf("Connection lost, reconnecting...")
+			c.log.Warn("client", "disconnect", "Connection lost")
+			c.log.Info("client", "reconnect", "Reconnecting")
 			c.connectWithBackoff(ctx)
 		}
 	case <-ctx.Done():
@@ -285,16 +294,22 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 	var req RequestFrame
 	dec := json.NewDecoder(stream)
 	if err := dec.Decode(&req); err != nil {
-		log.Printf("decode request: %v", err)
+		c.log.WithError(err).Error("client", "forward", "Failed to decode request")
 		return
 	}
+
+	logger := c.log.WithTraceID(req.TraceID).WithFields(logging.Fields{
+		"method":     req.Method,
+		"url":        req.URL,
+		"request_id": req.ID,
+	})
 
 	start := time.Now()
 
 	localURL := fmt.Sprintf("http://127.0.0.1:%s%s", c.localPort, req.URL)
 	httpReq, err := http.NewRequest(req.Method, localURL, bytes.NewReader(req.Body))
 	if err != nil {
-		log.Printf("create request: %v", err)
+		logger.WithError(err).Error("client", "forward", "Failed to create request")
 		c.sendError(stream, req.ID, http.StatusBadGateway)
 		return
 	}
@@ -303,10 +318,10 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 		httpReq.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		log.Printf("forward request: %v", err)
+		logger.WithError(err).Error("client", "forward", "Failed to forward request")
 		c.sendError(stream, req.ID, http.StatusBadGateway)
 		return
 	}
@@ -314,7 +329,7 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("read response: %v", err)
+		logger.WithError(err).Error("client", "forward", "Failed to read response")
 		c.sendError(stream, req.ID, http.StatusBadGateway)
 		return
 	}
@@ -328,6 +343,11 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 
 	durationMs := time.Since(start).Milliseconds()
 
+	logger.WithFields(logging.Fields{
+		"status_code": resp.StatusCode,
+		"duration_ms": durationMs,
+	}).Info("client", "forward", "Request forwarded")
+
 	if c.logger != nil {
 		reqLog := &RequestLog{
 			Method:          req.Method,
@@ -340,7 +360,7 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 			DurationMs:      durationMs,
 		}
 		if err := c.logger.Log(reqLog); err != nil {
-			log.Printf("log request: %v", err)
+			logger.WithError(err).Error("client", "forward", "Failed to log request")
 		}
 	}
 
@@ -353,7 +373,7 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 
 	enc := json.NewEncoder(stream)
 	if err := enc.Encode(&respFrame); err != nil {
-		log.Printf("encode response: %v", err)
+		logger.WithError(err).Error("client", "forward", "Failed to encode response")
 	}
 }
 
