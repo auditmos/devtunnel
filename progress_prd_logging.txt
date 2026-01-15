@@ -147,3 +147,22 @@ Build: go build ./... OK
 Tests: go test ./... OK
 
 Next: AI-Friendly Log Format Validation
+
+## 2026-01-15: AI-Friendly Log Format Validation - DONE
+
+Created logging/ai_format_test.go with 14 tests:
+- TestJSONL_ValidFormat: multiple logs = valid JSONL
+- TestJSONL_OneObjectPerLine: newlines in message preserved, single JSON line
+- TestJSON_RequiredFields: timestamp, level, component, action, message present
+- TestJSON_TimestampRFC3339: timestamps parse as RFC3339
+- TestJSON_LowercaseLevels: levels are debug/info/warn/error
+- TestJSON_ConsistentStructure: all entries parse to LogSchema
+- TestJSON_FieldTyping: strings, ints, floats, bools, nested objects typed correctly
+- TestJSON_FilterByLevel/Component/Action/TraceID: programmatic filtering works
+- TestJSON_AIParseable: realistic log entries parse correctly
+- TestJSON_NoExtraFields: only allowed fields present
+
+Build: go build ./... OK
+Tests: go test ./... OK
+
+PRD logging complete. All 8 features pass.
