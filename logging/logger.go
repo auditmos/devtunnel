@@ -25,6 +25,7 @@ type StandardLogger struct {
 	fields    Fields
 	traceID   string
 	sanitize  bool
+	errType   string
 }
 
 type LoggerConfig struct {
@@ -72,6 +73,7 @@ func (l *StandardLogger) log(level LogLevel, component, action, msg string) {
 		Message:   msg,
 		Fields:    fields,
 		TraceID:   l.traceID,
+		ErrorType: l.errType,
 	}
 
 	if errField, ok := l.fields["error"]; ok {
@@ -122,6 +124,7 @@ func (l *StandardLogger) WithFields(fields Fields) Logger {
 		fields:    newFields,
 		traceID:   l.traceID,
 		sanitize:  l.sanitize,
+		errType:   l.errType,
 	}
 }
 
@@ -129,7 +132,9 @@ func (l *StandardLogger) WithError(err error) Logger {
 	if err == nil {
 		return l
 	}
-	return l.WithFields(Fields{"error": err.Error()})
+	newLogger := l.WithFields(Fields{"error": err.Error()}).(*StandardLogger)
+	newLogger.errType = ErrorType(err)
+	return newLogger
 }
 
 func (l *StandardLogger) WithTraceID(traceID string) Logger {
@@ -140,6 +145,7 @@ func (l *StandardLogger) WithTraceID(traceID string) Logger {
 		fields:    l.fields,
 		traceID:   traceID,
 		sanitize:  l.sanitize,
+		errType:   l.errType,
 	}
 }
 

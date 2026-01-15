@@ -33,6 +33,10 @@ func (f *JSONFormatter) Format(entry LogEntry) ([]byte, error) {
 		output["error"] = entry.Error
 	}
 
+	if entry.ErrorType != "" {
+		output["error_type"] = entry.ErrorType
+	}
+
 	if entry.TraceID != "" {
 		output["trace_id"] = entry.TraceID
 	}
@@ -69,6 +73,10 @@ func (f *HumanFormatter) Format(entry LogEntry) ([]byte, error) {
 
 	if entry.Error != "" {
 		msg += fmt.Sprintf(" error=%s", entry.Error)
+	}
+
+	if entry.ErrorType != "" {
+		msg += fmt.Sprintf(" error_type=%s", entry.ErrorType)
 	}
 
 	if entry.TraceID != "" {

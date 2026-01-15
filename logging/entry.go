@@ -10,5 +10,6 @@ type LogEntry struct {
 	Message   string    `json:"message"`
 	Fields    Fields    `json:"fields,omitempty"`
 	Error     string    `json:"error,omitempty"`
+	ErrorType string    `json:"error_type,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
 }

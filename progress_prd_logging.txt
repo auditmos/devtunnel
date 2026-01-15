@@ -125,3 +125,25 @@ Build: go build ./... OK
 Tests: go test ./... OK
 
 Next: Error Logging Enhancement
+
+## 2026-01-15: Error Logging Enhancement - DONE
+
+Added error_type field and structured error helpers:
+- logging/entry.go: added ErrorType field to LogEntry
+- logging/formatter.go: JSONFormatter/HumanFormatter output error_type
+- logging/errors.go: new file with ContextError, WrapError, WrapErrorWithType, ErrorType helpers
+- logging/logger.go: WithError extracts error_type via ErrorType()
+
+Features:
+- Errors wrapped with context via fmt.Errorf/WrapError pattern
+- error_type field auto-extracted from net.OpError, custom TypedError, etc
+- JSON logs: {"error": "msg", "error_type": "OpError", "fields": {...}}
+- Sanitize flag redacts sensitive fields in error context
+- All error logs parseable as valid JSON
+
+Tests: 16 new tests in logging/errors_test.go
+- TestContextError_*, TestErrorType_*, TestLogger_WithError_*, TestLogger_ErrorWithFullContext, etc
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Next: AI-Friendly Log Format Validation
