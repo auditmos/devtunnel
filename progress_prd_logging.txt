@@ -101,3 +101,27 @@ Build: go build ./... OK
 Tests: go test ./... OK
 
 Next: Action Tracing with Trace IDs
+
+## 2026-01-15: Action Tracing with Trace IDs - DONE
+
+Added X-Trace-ID header propagation across request lifecycle:
+- Server: reads X-Trace-ID from incoming request, generates ULID if missing
+- Server: adds X-Trace-ID to response headers
+- Client: adds X-Trace-ID to local server requests when forwarding
+
+Changes:
+- tunnel/server.go: proxyToTunnel reads/generates trace_id, sets response header
+- tunnel/client.go: handleStream adds X-Trace-ID to local request
+
+Tests: 7 new tests in tunnel/trace_test.go
+- TestTraceIDPropagationToLocalServer: local server receives X-Trace-ID
+- TestTraceIDInResponseHeader: response has X-Trace-ID header
+- TestTraceIDConsistencyAcrossLogs: same trace_id in server/client logs and response
+- TestTraceIDPassthroughFromIncomingRequest: original trace_id preserved
+- TestTraceIDFilterableLogs: logs filterable by trace_id
+- TestTraceIDInErrorLogs: error logs include request context
+
+Build: go build ./... OK
+Tests: go test ./... OK
+
+Next: Error Logging Enhancement

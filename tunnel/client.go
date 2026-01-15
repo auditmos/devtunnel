@@ -317,6 +317,9 @@ func (c *Client) handleStream(stream io.ReadWriteCloser) {
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	if req.TraceID != "" {
+		httpReq.Header.Set("X-Trace-ID", req.TraceID)
+	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Do(httpReq)

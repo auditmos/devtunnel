@@ -439,7 +439,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Session, targetPath string) {
-	traceID := ulid.Make().String()
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = ulid.Make().String()
+	}
 
 	stream, err := sess.Session.Open()
 	if err != nil {
@@ -497,6 +500,7 @@ func (s *Server) proxyToTunnel(w http.ResponseWriter, r *http.Request, sess *Ses
 	for k, v := range respFrame.Headers {
 		w.Header().Set(k, v)
 	}
+	w.Header().Set("X-Trace-ID", traceID)
 	w.WriteHeader(respFrame.StatusCode)
 	w.Write(respFrame.Body)
 }
