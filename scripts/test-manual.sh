@@ -120,6 +120,25 @@ else
     log_fail "Invalid subdomain returned $HTTP_CODE (expected 502)"
 fi
 
+# Test 5b: X-Trace-ID header in response
+log_info "Testing X-Trace-ID response header..."
+TRACE_RESP=$(curl -s -D - -o /dev/null -H "Host: $SUBDOMAIN.$DOMAIN" "http://localhost:$SERVER_PORT/")
+if echo "$TRACE_RESP" | grep -qi 'X-Trace-ID:'; then
+    log_pass "Response includes X-Trace-ID header"
+else
+    log_fail "Response missing X-Trace-ID header"
+fi
+
+# Test 5c: X-Trace-ID passthrough
+log_info "Testing X-Trace-ID passthrough..."
+CUSTOM_TRACE="01HTEST1234567890ABCDEFGHI"
+TRACE_BACK=$(curl -s -D - -o /dev/null -H "Host: $SUBDOMAIN.$DOMAIN" -H "X-Trace-ID: $CUSTOM_TRACE" "http://localhost:$SERVER_PORT/" | grep -i 'X-Trace-ID:' | tr -d '\r' | awk '{print $2}')
+if [ "$TRACE_BACK" = "$CUSTOM_TRACE" ]; then
+    log_pass "X-Trace-ID passthrough preserved"
+else
+    log_fail "X-Trace-ID passthrough failed (got: $TRACE_BACK)"
+fi
+
 # Test 6: --safe flag scrubs sensitive headers
 log_info "Testing --safe flag header scrubbing..."
 # Kill current client, restart with --safe
@@ -171,13 +190,16 @@ else
     if [ -n "$JSON_LINES" ]; then
         # Validate it's valid JSON by trying to parse it
         if echo "$JSON_LINES" | python3 -m json.tool >/dev/null 2>&1; then
-            # Check for required fields
-            if echo "$JSON_LINES" | grep -q '"method"' && \
-               echo "$JSON_LINES" | grep -q '"url"' && \
-               echo "$JSON_LINES" | grep -q '"timestamp"'; then
-                log_pass "--json flag outputs valid JSONL"
+            # Check for structured logging required fields
+            if echo "$JSON_LINES" | grep -q '"timestamp"' && \
+               echo "$JSON_LINES" | grep -q '"level"' && \
+               echo "$JSON_LINES" | grep -q '"component"' && \
+               echo "$JSON_LINES" | grep -q '"action"' && \
+               echo "$JSON_LINES" | grep -q '"message"'; then
+                log_pass "--json flag outputs valid structured JSONL"
             else
-                log_fail "--json flag output missing required fields"
+                log_fail "--json output missing structured fields (timestamp/level/component/action/message)"
+                echo "Got: $JSON_LINES"
             fi
         else
             log_fail "--json flag output is not valid JSON"
@@ -190,6 +212,23 @@ else
     fi
 fi
 rm -f "$JSON_CLIENT_OUTPUT"
+
+# Test 8: --log-level flag accepts valid levels
+log_info "Testing --log-level flag..."
+LEVEL_OUTPUT=$(mktemp)
+"$BINARY" start --json --log-level debug -p "$CLIENT_PORT" -s "localhost:$SERVER_PORT" --dashboard-addr "127.0.0.1:4043" > "$LEVEL_OUTPUT" 2>&1 &
+LEVEL_PID=$!
+PIDS+=($LEVEL_PID)
+sleep 3
+
+# Debug level should emit connect logs
+if grep -q '"level":"debug"\|"level":"info"' "$LEVEL_OUTPUT"; then
+    log_pass "--log-level debug emits logs"
+else
+    log_fail "--log-level debug did not emit expected logs"
+fi
+kill "$LEVEL_PID" 2>/dev/null || true
+rm -f "$LEVEL_OUTPUT"
 
 rm -f "$CLIENT_OUTPUT"
 
